@@ -1,139 +1,173 @@
-# BusinessInfinity Repository Specification
+# boardroom.asisaga.com Repository Specification
 
-**Version**: 1.0.0  
-**Status**: Active  
-**Last Updated**: 2026-03-07
+**v2.0.0 | Jekyll | GitHub Pages | Genesis Ontological Design System**
 
-## Overview
+---
 
-BusinessInfinity is a lean Azure Functions application that delegates all agent orchestration, Service Bus communication, authentication, and deployment scaffolding to the **`aos-client-sdk`**. The application contains only business logic — expressed as workflow functions decorated with `@app.workflow`.
+## Identity
 
-## Scope
+The Business Infinity application frontend — conversational Boardroom interface for AI-powered business governance. Jekyll static site deployed on GitHub Pages, backed by `boardroom` Azure Functions at `cloud.businessinfinity.asisaga.com`, consuming `mind.asisaga.com` MCP Apps for agent mind state and human governance.
 
-- Repository role in the AOS ecosystem
-- Technology stack and coding patterns
-- Testing and validation workflows
-- Key design principles for agents and contributors
+Whitepaper: `boardroom-whitepaper-v4.md` §6 — Layer 5: Copilot Agent Organization
 
-## Repository Role
+---
 
-| Concern | Owner |
-|---------|-------|
-| Business workflows (strategic review, market analysis, budget approval, etc.) | **BusinessInfinity** |
-| Azure Functions scaffolding, HTTP/Service Bus triggers, auth | `aos-client-sdk` |
-| Agent lifecycle, perpetual orchestration, messaging, storage, monitoring | AOS |
-| Agent catalog (C-suite agents, capabilities) | RealmOfAgents |
+## Visual Ontology
 
-BusinessInfinity **knows nothing about agent internals**. It calls `start_orchestration` / `submit_orchestration` and lets AOS handle the rest.
+Built on `ASISaga/theme.asisaga.com` via Jekyll `remote_theme`. The Genesis Ontological Design System is not a styling library — it is the visual Ahankara of the ASI Saga organism. The same ontological vocabulary that governs agent identity governs visual identity.
+
+| Semantic Category | Role | Boardroom Usage |
+|---|---|---|
+| `genesis-environment` | Space as context | Deliberation space, session containers |
+| `genesis-entity` | Visual being | Agent avatars, CXO presence cards |
+| `genesis-cognition` | Typography as knowing | Decision records, rationale, axiom statements |
+| `genesis-synapse` | Interaction as connection | Covenant speech-acts, routing actions |
+| `genesis-state` | Condition/becoming | Session status, deliberation state |
+| `genesis-atmosphere` | Ambient presence | Resonance field, collective mind visualization |
+
+Sacred SCSS components used directly:
+
+| Component | Usage |
+|---|---|
+| `consciousness-cards` | CXO agent profiles — Ahankara made visible |
+| `genesis-blocks` | Deliberation outputs — Buddhi rendered |
+| `transcendent-hero` | Boardroom landing — Possibility declared |
+
+The parallel to the agent stack is exact and intentional:
+
+```
+theme.asisaga.com              Visual ontology substrate (remote_theme)
+  boardroom.asisaga.com        Visual identity of the Boardroom
+
+mind.asisaga.com               Consciousness substrate (MCP)
+  PurposeDrivenAgent           Agent consciousness
+    CXO agents                 Domain-specific identity
+```
+
+---
+
+## Architecture Position
+
+```
+theme.asisaga.com              Visual Ahankara
+  └── boardroom.asisaga.com    THIS REPO — Business Infinity frontend
+        └── boardroom          Azure Functions (cloud.businessinfinity.asisaga.com)
+              └── mind.asisaga.com   MCP Apps — mind state + human governance
+```
+
+---
 
 ## Technology Stack
 
 | Component | Technology |
-|-----------|-----------|
-| Runtime | Python 3.10+ |
-| App framework | `aos-client-sdk[azure]` — `AOSApp` / `WorkflowRequest` |
-| Hosting | Azure Functions (provisioned by SDK) |
-| Messaging | Azure Service Bus (provisioned by SDK) |
-| Tests | `pytest` + `pytest-asyncio` |
-| Linter | `pylint` |
-| Build / deploy | `azure.yaml` (Azure Developer CLI) |
+|---|---|
+| Static site generator | Jekyll (Liquid templates, Markdown) |
+| Theme | `remote_theme: ASISaga/theme.asisaga.com` |
+| Markup | HTML5 semantic |
+| Styling | SCSS via Genesis Ontological Design System — no raw CSS |
+| Framework | Bootstrap (via theme) |
+| JavaScript | ES6+ modules |
+| Components | Web Components — `<boardroom-chat>`, `<mcp-dashboard>`, `<aml-demo>`, `<boardroom-app>` |
+| Deployment | GitHub Pages |
+| Backend API | `cloud.businessinfinity.asisaga.com` — `boardroom` Azure Functions |
+| Mind MCP | `mind.asisaga.com` — MCP Apps UI consumer |
 
-## Directory Structure
+---
 
-```
-business-infinity/
-├── src/
-│   └── business_infinity/
-│       ├── __init__.py
-│       └── workflows.py       # @app.workflow decorators — all business logic lives here
-├── tests/
-│   └── test_workflows.py      # pytest unit tests
-├── function_app.py            # Azure Functions entry point: app.get_functions()
-├── pyproject.toml             # Build config, dependencies, pytest settings
-└── azure.yaml                 # Azure Developer CLI deployment config
-```
+## Layouts
 
-## Core Patterns
+From `theme.asisaga.com`:
 
-### Workflow Definition
+| Layout | Usage |
+|---|---|
+| `chatroom.html` | Primary Boardroom deliberation interface |
+| `dashboard.html` | Governance — session history, decision log, Resonance trend |
+| `app.html` | Onboarding flow — Genesis Sprint CXO enrolment |
+| `landing.html` | Boardroom landing — Possibility declared |
+| `profile.html` | CXO agent identity — Ahankara view |
 
-```python
-from aos_client import AOSApp, WorkflowRequest
+---
 
-app = AOSApp(name="business-infinity")
+## Human Interaction Contract
 
-@app.workflow("workflow-name")
-async def my_workflow(request: WorkflowRequest) -> dict:
-    agents = await request.client.list_agents()
-    status = await request.client.start_orchestration(
-        agent_ids=[a.agent_id for a in agents],
-        purpose="Describe the perpetual goal",
-        context=request.body,
-    )
-    return {"orchestration_id": status.orchestration_id, "status": status.status.value}
-```
+Speech-act types map to `mind.asisaga.com` MCP writes:
 
-### Perpetual Orchestrations
+| Speech-Act | Interface Action | Mind Write |
+|---|---|---|
+| Possibility declaration | Covenant prompt | `set_possibility(agent_id, declaration)` |
+| Integrity commitment | Commitment registration | `append_integrity(agent_id, commitment)` |
+| Responsibility stance | Authorship declaration | Updates `responsibility.jsonld` |
+| Covenant acceptance | Genesis Sprint onboarding | Initialises all three Erhard dimensions |
+| Directive | Boardroom directive panel | `append_collective(app, "directives", directive)` |
+| P1 event acknowledgement | Notification approval | Releases autonomous session trigger |
 
-All orchestrations are **perpetual and purpose-driven** — agents work toward the purpose indefinitely. There is no finite completion.
+---
 
-```python
-status = await request.client.start_orchestration(
-    agent_ids=agent_ids,
-    purpose="Drive strategic review and continuous organisational improvement",
-    purpose_scope="C-suite strategic alignment and cross-functional coordination",
-    context=request.body,
-)
-```
+## Onboarding Flow (Genesis Sprint Week 1)
 
-### C-Suite Agent Selection
+Seven steps — all must complete before agent sessions begin:
 
-```python
-# Prefer explicit IDs; fall back to type-based selection
-all_agents = await client.list_agents()
-by_id = {a.agent_id: a for a in all_agents}
-selected = [by_id[aid] for aid in C_SUITE_AGENT_IDS if aid in by_id]
-```
+1. Covenant acceptance — terms, role acknowledgement
+2. Ahankara declaration — identity axis, non-negotiables
+3. Possibility declaration — committed future for domain
+4. Integrity registration — commitments made; incomplete acknowledged
+5. Responsibility stance — authorship declared
+6. Manas context review — immutable company/product knowledge pre-loaded by architects
+7. Buddhi review — domain wisdom and action plan seeded for persona
 
-## Testing Workflow
+Only after step 7: agents hydrated from CXO's own declared mind, sessions begin.
 
-```bash
-# Install dev dependencies
-pip install -e ".[dev]"
+---
 
-# Run all tests
-pytest tests/ -v
+## Real-Time Session Interface
 
-# Lint
-pylint src/business_infinity/
+`<boardroom-chat>` web component:
 
-# Specific test
-pytest tests/test_workflows.py -v -k "test_workflows_registered"
-```
+- 5-second polling for session updates
+- Messages tagged with agent role and speech-act type (proposal, question, objection, resolution)
+- Decisions rendered as `consciousness-cards` — structured, role-attributed, timestamped
+- Routing tags rendered as synapse actions — `[ROUTE:CFO]`, `[HANDBACK]`, `[COMPLETE]`
+- Session Resonance score displayed per turn
 
-**CI**: GitHub Actions runs `pytest` across Python 3.10, 3.11, and 3.12 on every push/PR to `main`.
+---
 
-→ **CI workflow**: `.github/workflows/ci.yml`
+## Governance Views
+
+| View | Content | Mind Source |
+|---|---|---|
+| Decision log | Session decisions, rationale, alternatives, counterfactuals | `conversations/{orchestration_id}` |
+| Resonance trend | Purpose alignment score across sessions | `collective/resonance.jsonld` |
+| Integrity register | Commitments made, kept, incomplete | `{agent_id}/Integrity/integrity.jsonld` |
+| Possibility tracker | Declared futures per CXO domain | `{agent_id}/Possibility/possibility.jsonld` |
+| Collective mind | Shared consciousness, active directives | `collective/boardroom.jsonld` |
+| Board audit report | Exportable structured record for board pack | Generated from decision log |
+
+---
+
+## Invariants
+
+- No direct database access — reads exclusively from `mind.asisaga.com` MCP and `boardroom` API
+- No agent code — never imports from any agent package
+- No raw CSS — all styling through Genesis Ontological Design System mixins
+- Speech-acts are the only write mechanism — humans write to mind only through covenant-typed interface actions
+- Onboarding complete only when all seven steps confirmed — no partial onboarding
+
+---
+
+## Specifications
+
+| Specification | Concern |
+|---|---|
+| `.github/specs/chatroom.md` | `<boardroom-chat>` real-time session interface |
+| `.github/specs/onboarding.md` | Genesis Sprint — seven-step mind initialisation |
+| `.github/specs/governance.md` | Decision log, Resonance trend, board audit report |
+| `.github/specs/speech-acts.md` | Covenant speech-act types and mind write mappings |
 
 ## Related Repositories
 
-| Repository | Role |
-|-----------|------|
-| [aos-client-sdk](https://github.com/ASISaga/aos-client-sdk) | Client SDK & App Framework |
-| [aos-dispatcher](https://github.com/ASISaga/aos-dispatcher) | AOS Orchestration API |
-| [aos-realm-of-agents](https://github.com/ASISaga/aos-realm-of-agents) | Agent catalog (C-suite) |
-| [aos-kernel](https://github.com/ASISaga/aos-kernel) | OS kernel |
-
-## Key Design Principles
-
-1. **Zero boilerplate** — No Azure Functions scaffolding in this repo
-2. **Purpose-driven** — Orchestrations are perpetual; describe *why*, not *how*
-3. **SDK-delegated** — All infrastructure concerns belong to `aos-client-sdk`
-4. **Business-only** — Only business logic lives here; no agent internals
-
-## References
-
-→ **Agent framework**: `.github/specs/agent-intelligence-framework.md`  
-→ **Conventional tools**: `.github/docs/conventional-tools.md`  
-→ **Python coding standards**: `.github/instructions/python.instructions.md`  
-→ **Azure Functions patterns**: `.github/instructions/azure-functions.instructions.md`
+| Repository | Relationship |
+|---|---|
+| `ASISaga/theme.asisaga.com` | Visual ontology substrate — `remote_theme` |
+| `ASISaga/boardroom` | Backend Azure Functions — business workflows API |
+| `ASISaga/mind.asisaga.com` | Consciousness substrate — MCP Apps consumer |
+| `ASISaga/aos-infra` | Deployment — `deploy-function-app.yml` reusable workflow |
