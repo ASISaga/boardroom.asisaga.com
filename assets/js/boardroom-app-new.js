@@ -3,15 +3,23 @@
  * Extends the generic chatroom for business-specific features.
  * Includes: agent list, profiles, toggle strip, members sidebar.
  *
- * Chat messages are routed through the server-side CopilotKit runtime
- * (@copilotkit/sdk-js compatible AG-UI HTTP protocol) when a
- * `copilotkit-runtime-url` attribute is present on the element.
+ * Chat messages are now routed through our own Azure Function backend
+ * (`${apiBase}/chat`) which forwards to the Azure AI Foundry agent.
+ * The CopilotKit runtime path is left in place but no longer called
+ * automatically — see `sendMessage()` below.
+ *
+ * A simple team-password login gate runs before the chat UI is usable.
+ * The resulting token is stored in localStorage under `access_token` —
+ * matching the key copilotkit-client.js already reads — and attached as a
+ * Bearer token on every API request.
  */
 
 // Import ChatroomApp from the remote theme
 // This path will be resolved by GitHub Pages through the remote_theme configuration
 import ChatroomApp from '/assets/js/chatroom-app.js';
 import { CopilotKitClient } from '/assets/js/copilotkit-client.js';
+
+const AUTH_TOKEN_KEY = 'access_token'; // matches copilotkit-client.js's localStorage key
 
 class BoardroomApp extends ChatroomApp {
     constructor() {
@@ -23,6 +31,7 @@ class BoardroomApp extends ChatroomApp {
             showMembersSidebar: this.hasAttribute('show-members-sidebar'),
             showAgentProfiles: this.hasAttribute('show-agent-profiles'),
             apiBase: this.getAttribute('api-base') || '/api/boardroom',
+            loginEndpoint: this.getAttribute('login-endpoint') || '/api/login',
             enableScreenShare: this.hasAttribute('enable-screen-share'),
             enableVideoCall: this.hasAttribute('enable-video-call'),
             enableFileAttach: this.hasAttribute('enable-file-attach'),
@@ -36,8 +45,108 @@ class BoardroomApp extends ChatroomApp {
         this.conversationId = null;
         this.members = [];
 
-        // CopilotKit client – initialised in connectedCallback if runtime URL is set
+        // CopilotKit client – left initialised for now but not used by
+        // sendMessage(); kept so it's easy to revert if needed.
         this.copilotKit = null;
+
+        // Auth state
+        this.authToken = localStorage.getItem(AUTH_TOKEN_KEY) || null;
+    }
+
+    // ── Auth: login gate ─────────────────────────────────────────────────
+
+    /**
+     * True once we have a token. Does not verify it's still valid server-side
+     * (a 401 from any request will trigger _showLoginGate() again).
+     */
+    _isAuthenticated() {
+        return !!this.authToken;
+    }
+
+    /**
+     * Render a minimal password prompt over the chat area. Resolves once
+     * login succeeds and this.authToken is set.
+     */
+    _showLoginGate() {
+        return new Promise((resolve) => {
+            const chatArea = this.querySelector('#chatArea') || this;
+
+            const overlay = document.createElement('div');
+            overlay.className = 'boardroom-login-gate';
+            overlay.innerHTML = `
+                <form class="boardroom-login-form">
+                    <h2 class="boardroom-login-title">Boardroom Access</h2>
+                    <input type="text" name="name" placeholder="Your name" class="boardroom-login-input" autocomplete="name" />
+                    <input type="password" name="password" placeholder="Team password" class="boardroom-login-input" autocomplete="current-password" required />
+                    <button type="submit" class="boardroom-login-submit">Enter</button>
+                    <p class="boardroom-login-error" hidden></p>
+                </form>
+            `;
+
+            const form = overlay.querySelector('.boardroom-login-form');
+            const errorEl = overlay.querySelector('.boardroom-login-error');
+
+            form.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                errorEl.hidden = true;
+
+                const name = form.querySelector('[name="name"]').value.trim();
+                const password = form.querySelector('[name="password"]').value;
+
+                try {
+                    const res = await fetch(this.boardroomConfig.loginEndpoint, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ name, password }),
+                    });
+
+                    if (!res.ok) {
+                        const body = await res.json().catch(() => ({}));
+                        errorEl.textContent = body.error || 'Login failed. Check the password and try again.';
+                        errorEl.hidden = false;
+                        return;
+                    }
+
+                    const data = await res.json();
+                    this.authToken = data.token;
+                    localStorage.setItem(AUTH_TOKEN_KEY, this.authToken);
+
+                    overlay.remove();
+                    resolve();
+                } catch (err) {
+                    console.error('[Boardroom] Login request failed:', err);
+                    errorEl.textContent = 'Could not reach the server. Please try again.';
+                    errorEl.hidden = false;
+                }
+            });
+
+            chatArea.appendChild(overlay);
+        });
+    }
+
+    /**
+     * Wrapper around fetch() that attaches the auth token and, on a 401,
+     * re-runs the login gate once before retrying the request.
+     */
+    async _authedFetch(url, options = {}) {
+        const doFetch = () => fetch(url, {
+            ...options,
+            headers: {
+                ...(options.headers || {}),
+                ...(this.authToken ? { Authorization: `Bearer ${this.authToken}` } : {}),
+            },
+        });
+
+        let response = await doFetch();
+
+        if (response.status === 401) {
+            localStorage.removeItem(AUTH_TOKEN_KEY);
+            this.authToken = null;
+            await this._showLoginGate();
+            response = await doFetch();
+        }
+
+        return response;
     }
 
     /**
@@ -247,6 +356,11 @@ class BoardroomApp extends ChatroomApp {
         // Call parent connectedCallback
         await super.connectedCallback();
 
+        // Require login before anything else touches the API
+        if (!this._isAuthenticated()) {
+            await this._showLoginGate();
+        }
+
         // Initialize boardroom-specific features
         await this.initializeBoardroom();
 
@@ -283,9 +397,7 @@ class BoardroomApp extends ChatroomApp {
     /**
      * Initialise the CopilotKit client that connects to the server-side
      * CopilotKit runtime (@copilotkit/sdk-js / AG-UI HTTP protocol).
-     *
-     * The runtime URL is read from the `copilotkit-runtime-url` element attribute.
-     * Falls back gracefully to the legacy REST API when no URL is supplied.
+     * Currently unused by sendMessage() — kept for easy revert.
      */
     _initCopilotKit() {
         const runtimeUrl = this.boardroomConfig.copilotKitRuntimeUrl;
@@ -293,22 +405,15 @@ class BoardroomApp extends ChatroomApp {
 
         this.copilotKit = new CopilotKitClient({ runtimeUrl });
 
-        // Stream each incoming token into the active AI bubble
         this.copilotKit.onStreamChunk = (chunk, messageId) => {
             this._appendStreamChunk(chunk, messageId);
         };
-
-        // Called when the AI starts a new message
         this.copilotKit.onMessageStart = (messageId, agentName) => {
             this._createStreamingBubble(messageId, agentName || this.currentAgent?.name);
         };
-
-        // Called when the AI message is complete
         this.copilotKit.onMessageEnd = (messageId, fullContent) => {
             this._finalizeStreamingBubble(messageId, fullContent);
         };
-
-        // Error handler
         this.copilotKit.onError = (error) => {
             console.error('[CopilotKit] Error:', error);
             this.showToast('AI response error – please try again', 'error');
@@ -322,13 +427,10 @@ class BoardroomApp extends ChatroomApp {
 
         // Get boardroom-specific elements
         this.boardroomElements = {
-            // Toggle strip in partials uses the members-sidebar naming; fall back to legacy class if present
             toggleStrip: this.querySelector('.boardroom-members-sidebar-toggle-strip') || this.querySelector('.boardroom-toggle-strip'),
             membersSidebar: this.querySelector('.boardroom-members-sidebar'),
-            // Members list container provided by Jekyll partials
             agentList: this.querySelector('#membersListContainer'),
             chatArea: this.querySelector('.boardroom-chat-area'),
-            // Optional profile detail section; tolerate absence
             profileDetail: this.querySelector('[data-boardroom-region="profile"]') || this.querySelector('#profile-detail'),
             loadingOverlay: this.querySelector('.boardroom-loading-overlay'),
             toastContainer: this.querySelector('.boardroom-toast-container')
@@ -336,7 +438,6 @@ class BoardroomApp extends ChatroomApp {
     }
 
     attachBoardroomEventHandlers() {
-        // Agent selection
         if (this.boardroomElements.agentList) {
             this.boardroomElements.agentList.addEventListener('click', (e) => {
                 const agentItem = e.target.closest('[data-agent-id]');
@@ -347,19 +448,16 @@ class BoardroomApp extends ChatroomApp {
             });
         }
 
-        // Screen share button
         const screenShareBtn = this.querySelector('[title="Screen Share"]');
         if (screenShareBtn && this.boardroomConfig.enableScreenShare) {
             screenShareBtn.addEventListener('click', () => this.startScreenShare());
         }
 
-        // Video call button
         const videoCallBtn = this.querySelector('[title="Video Call"]');
         if (videoCallBtn && this.boardroomConfig.enableVideoCall) {
             videoCallBtn.addEventListener('click', () => this.startVideoCall());
         }
 
-        // File attach button
         const fileAttachBtn = this.querySelector('[title="Attach File"]');
         if (fileAttachBtn && this.boardroomConfig.enableFileAttach) {
             fileAttachBtn.addEventListener('click', () => this.attachFile());
@@ -395,7 +493,6 @@ class BoardroomApp extends ChatroomApp {
     initializeMembersSidebar() {
         if (!this.boardroomElements.membersSidebar) return;
 
-        // Search functionality
         const searchInput = this.boardroomElements.membersSidebar.querySelector('.boardroom-search-input');
         if (searchInput) {
             searchInput.addEventListener('input', (e) => {
@@ -406,7 +503,7 @@ class BoardroomApp extends ChatroomApp {
 
     async loadAgents() {
         try {
-            const response = await fetch(`${this.boardroomConfig.apiBase}/agents`);
+            const response = await this._authedFetch(`${this.boardroomConfig.apiBase}/agents`);
             if (response.ok) {
                 this.agents = await response.json();
                 this.renderAgents();
@@ -442,7 +539,6 @@ class BoardroomApp extends ChatroomApp {
         this.showLoading('Connecting to agent...');
 
         try {
-            // Highlight selected agent
             this.boardroomElements.agentList.querySelectorAll('.boardroom-agent-item').forEach(item => {
                 item.classList.remove('active');
             });
@@ -453,41 +549,19 @@ class BoardroomApp extends ChatroomApp {
 
             this.currentAgent = this.agents.find(a => a.agentId === agentId);
 
-            // Inform the CopilotKit client which agent is now active so that
-            // subsequent messages are routed to the correct runtime agent.
-            if (this.copilotKit) {
-                this.copilotKit.setAgent(agentId);
-                // Start a fresh conversation thread for the new agent
-                this.copilotKit.resetThread();
-            }
-
             // Load agent profile
-            const profileResponse = await fetch(`${this.boardroomConfig.apiBase}/agents/${agentId}`);
+            const profileResponse = await this._authedFetch(`${this.boardroomConfig.apiBase}/agents/${agentId}`);
             if (profileResponse.ok) {
                 const profile = await profileResponse.json();
                 this.renderAgentProfile(profile);
             }
 
-            if (this.copilotKit) {
-                // CopilotKit path – no separate conversation API needed
-                this.updateTitle(this.currentAgent?.name ?? agentId);
-                this._clearMessages();
-            } else {
-                // Legacy REST path
-                const convResponse = await fetch(`${this.boardroomConfig.apiBase}/conversations`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ agentId })
-                });
-
-                if (convResponse.ok) {
-                    const conversation = await convResponse.json();
-                    this.conversationId = conversation.conversationId;
-                    this.config.apiEndpoint = `${this.boardroomConfig.apiBase}/conversations/${this.conversationId}`;
-                    await this.loadMessages();
-                    this.updateTitle(this.currentAgent.name);
-                }
-            }
+            // Start a fresh conversation "thread" for the new agent.
+            // conversationId is just tracked client-side now; the backend
+            // /chat route is stateless per-request.
+            this.conversationId = `${agentId}-${Date.now()}`;
+            this._clearMessages();
+            this.updateTitle(this.currentAgent?.name ?? agentId);
 
             this.hideLoading();
 
@@ -533,7 +607,6 @@ class BoardroomApp extends ChatroomApp {
             detail: { view }
         }));
 
-        // Add view-specific logic here
         if (view === 'chat') {
             this.boardroomElements.chatArea?.classList.remove('hidden');
             this.boardroomElements.profileDetail?.classList.add('hidden');
@@ -553,23 +626,61 @@ class BoardroomApp extends ChatroomApp {
         });
     }
 
-    // Enhanced sendMessage to include agent context
+    /**
+     * Send the current input via the CopilotKit runtime when configured;
+     * otherwise fall back to our own backend's /chat route.
+     */
     async sendMessage() {
-        // When a CopilotKit runtime is configured, use it for all messages.
-        // An agent does not need to be pre-selected – the runtime can handle
-        // boardroom-level requests and route them internally.
         if (this.copilotKit) {
             await this._sendViaCopilotKit();
             return;
         }
 
-        // Legacy REST path: agent must be selected
-        if (!this.conversationId || !this.currentAgent) {
-            this.showToast('Please select an agent first', 'warning');
-            return;
-        }
+        // Fallback: our own backend route (non-streaming)
+        const inputEl = this._getChatInputElement();
+        if (!inputEl) return;
 
-        await super.sendMessage();
+        const text = inputEl.value.trim();
+        if (!text) return;
+
+        inputEl.value = '';
+        this._updateCharCount(inputEl);
+
+        const messagesEl = (this.elements && this.elements.messagesContainer)
+            || this.querySelector('.chatroom-messages');
+        const emptyState = messagesEl
+            ? messagesEl.querySelector('.chatroom-empty-state')
+            : this.querySelector('.chatroom-empty-state');
+        if (emptyState) emptyState.hidden = true;
+
+        this._appendUserMessage(text);
+        this.showLoading('Waiting for response...');
+
+        try {
+            const response = await this._authedFetch(`${this.boardroomConfig.apiBase}/chat`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    message: text,
+                    agentId: this.currentAgent?.agentId ?? null,
+                    conversationId: this.conversationId ?? null,
+                }),
+            });
+
+            if (!response.ok) {
+                const errBody = await response.json().catch(() => ({}));
+                throw new Error(errBody.error || `Request failed (${response.status})`);
+            }
+
+            const data = await response.json();
+            const replyText = data.message || data.reply || data.text || JSON.stringify(data);
+            this._appendAgentMessage(replyText);
+        } catch (error) {
+            console.error('[Boardroom] sendMessage failed:', error);
+            this.showToast('Failed to get a response — please try again', 'error');
+        } finally {
+            this.hideLoading();
+        }
     }
 
     /**
@@ -583,25 +694,19 @@ class BoardroomApp extends ChatroomApp {
         const text = inputEl.value.trim();
         if (!text) return;
 
-        // Clear the input
         inputEl.value = '';
         this._updateCharCount(inputEl);
 
-        // Dismiss the empty-state placeholder if shown
         const messagesEl = (this.elements && this.elements.messagesContainer)
             || this.querySelector('.chatroom-messages');
         const emptyState = messagesEl
             ? messagesEl.querySelector('.chatroom-empty-state')
             : this.querySelector('.chatroom-empty-state');
-        if (emptyState) {
-            emptyState.hidden = true;
-        }
+        if (emptyState) emptyState.hidden = true;
 
-        // Render the user's message immediately
         this._appendUserMessage(text);
 
         try {
-            // Stream the response from CopilotKit runtime
             await this.copilotKit.sendMessage(text, {
                 context: this.currentAgent
                     ? [{ description: `Active boardroom agent: ${this.currentAgent.name} (${this.currentAgent.role || 'C-suite Executive'})` }]
@@ -614,7 +719,7 @@ class BoardroomApp extends ChatroomApp {
         }
     }
 
-    // ── DOM helpers for CopilotKit streaming messages ───────────────────────
+    // ── DOM helpers ──────────────────────────────────────────────────────
 
     /** Get the chat textarea element */
     _getChatInputElement() {
@@ -642,7 +747,6 @@ class BoardroomApp extends ChatroomApp {
             || this.querySelector('.chatroom-messages');
         if (messagesEl) {
             messagesEl.replaceChildren();
-            // Re-show the empty state placeholder
             const emptyState = messagesEl.querySelector('.chatroom-empty-state');
             if (emptyState) emptyState.hidden = false;
         }
@@ -677,6 +781,72 @@ class BoardroomApp extends ChatroomApp {
         metaDiv.appendChild(timestamp);
         contentDiv.appendChild(bubble);
         contentDiv.appendChild(metaDiv);
+        article.appendChild(contentDiv);
+        messagesEl.appendChild(article);
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    /** Append a completed agent reply bubble (non-streaming) */
+    _appendAgentMessage(text) {
+        const messagesEl = (this.elements && this.elements.messagesContainer)
+            || this.querySelector('.chatroom-messages');
+        if (!messagesEl) return;
+
+        const agent = this.currentAgent?.name || 'AI';
+        const role = this.currentAgent?.role || 'AI Assistant';
+        const avatar = this.currentAgent?.avatar || '';
+        const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+        const article = document.createElement('article');
+        article.className = 'boardroom-message-row';
+        article.setAttribute('aria-label', `Message from ${agent}`);
+
+        const avatarBlock = document.createElement('div');
+        avatarBlock.className = 'boardroom-message-avatar-block';
+
+        if (avatar) {
+            const img = document.createElement('img');
+            img.src = avatar;
+            img.alt = agent;
+            img.className = 'boardroom-message-avatar';
+            img.width = 40;
+            img.height = 40;
+            avatarBlock.appendChild(img);
+        }
+
+        const avatarMeta = document.createElement('div');
+        avatarMeta.className = 'boardroom-message-avatar-meta';
+
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 'boardroom-message-avatar-name';
+        nameSpan.textContent = agent;
+        avatarMeta.appendChild(nameSpan);
+        avatarMeta.appendChild(document.createElement('br'));
+
+        const roleSpan = document.createElement('span');
+        roleSpan.className = 'boardroom-message-avatar-role';
+        roleSpan.textContent = role;
+        avatarMeta.appendChild(roleSpan);
+        avatarBlock.appendChild(avatarMeta);
+
+        const contentDiv = document.createElement('div');
+        contentDiv.className = 'boardroom-message-content';
+
+        const bubble = document.createElement('div');
+        bubble.className = 'boardroom-message-bubble bg-white text-dark';
+        bubble.textContent = text;
+
+        const metaDiv = document.createElement('div');
+        metaDiv.className = 'boardroom-message-meta boardroom-message-meta-received';
+
+        const timeSpan = document.createElement('span');
+        timeSpan.className = 'boardroom-message-timestamp';
+        timeSpan.textContent = time;
+        metaDiv.appendChild(timeSpan);
+
+        contentDiv.appendChild(bubble);
+        contentDiv.appendChild(metaDiv);
+        article.appendChild(avatarBlock);
         article.appendChild(contentDiv);
         messagesEl.appendChild(article);
         messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -767,14 +937,11 @@ class BoardroomApp extends ChatroomApp {
         const bubble = this.querySelector(`#copilotkit-bubble-${messageId}`);
         if (!bubble) return;
 
-        // Remove the blinking cursor if it is still present
         const cursor = bubble.querySelector('.boardroom-streaming-cursor');
         if (cursor) cursor.remove();
 
-        // Append text node
         bubble.appendChild(document.createTextNode(chunk));
 
-        // Re-add cursor at the end
         const newCursor = document.createElement('span');
         newCursor.className = 'boardroom-streaming-cursor';
         newCursor.textContent = '▍';
@@ -796,18 +963,15 @@ class BoardroomApp extends ChatroomApp {
     _finalizeStreamingBubble(messageId, fullContent) {
         const bubble = this.querySelector(`#copilotkit-bubble-${messageId}`);
         if (bubble) {
-            // Remove cursor
             const cursor = bubble.querySelector('.boardroom-streaming-cursor');
             if (cursor) cursor.remove();
 
-            // Ensure the full content is rendered (guards against dropped chunks)
             if (bubble.textContent.trim() !== fullContent.trim()) {
                 bubble.textContent = '';
                 bubble.appendChild(document.createTextNode(fullContent));
             }
         }
 
-        // Update timestamp
         const timeEl = this.querySelector(`#copilotkit-time-${messageId}`);
         if (timeEl) {
             timeEl.textContent = new Date().toLocaleTimeString([], {
@@ -854,7 +1018,7 @@ class BoardroomApp extends ChatroomApp {
             formData.append('file', file);
             formData.append('conversationId', this.conversationId);
 
-            const response = await fetch(`${this.boardroomConfig.apiBase}/files`, {
+            const response = await this._authedFetch(`${this.boardroomConfig.apiBase}/files`, {
                 method: 'POST',
                 body: formData
             });
@@ -902,7 +1066,6 @@ class BoardroomApp extends ChatroomApp {
     }
 
     disconnectedCallback() {
-        // Abort any in-flight CopilotKit stream to free resources
         if (this.copilotKit) {
             this.copilotKit.abort();
         }
