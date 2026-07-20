@@ -25,15 +25,7 @@ boardroom:
 
 {% comment %}Chatroom HTML templates — cloned at runtime by boardroom-app-new.js via ChatroomApp{% endcomment %}
 <div id="chatroom-templates" hidden aria-hidden="true">
-  {% include layouts/chatroom/chatroom-layout.html %}
-  {% include layouts/chatroom/chatroom-message-ai.html %}
-  {% include layouts/chatroom/chatroom-message-own.html %}
-  {% include layouts/chatroom/chatroom-message-system.html %}
-  {% include layouts/chatroom/chatroom-message-typing.html %}
-  {% include layouts/chatroom/chatroom-mcp-panel.html %}
-  {% include layouts/chatroom/chatroom-mcp-item.html %}
-  {% include layouts/chatroom/chatroom-input.html %}
-  {% include layouts/chatroom/chatroom-tool-result-item.html %}
+  {% include layouts/chatroom.html %}
 </div>
 
 <boardroom-app
