@@ -356,6 +356,12 @@ class BoardroomApp extends ChatroomApp {
         // Call parent connectedCallback
         await super.connectedCallback();
 
+        // Hide the initial loading overlay now that the layout has rendered —
+        // it's no longer tied to a live connection at this stage. Without this,
+        // the overlay stays visible indefinitely since hideLoading() otherwise
+        // only fires after a successful agent selection.
+        this.hideLoading();
+
         // Require login before anything else touches the API
         if (!this._isAuthenticated()) {
             await this._showLoginGate();
