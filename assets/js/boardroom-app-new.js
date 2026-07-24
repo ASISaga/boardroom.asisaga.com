@@ -12,6 +12,11 @@
  * The resulting token is stored in localStorage under `access_token` —
  * matching the key copilotkit-client.js already reads — and attached as a
  * Bearer token on every API request.
+ *
+ * TEMP (standalone chat UI testing): the login gate, agent loading, and
+ * live backend/CopilotKit calls in sendMessage() are disabled below so the
+ * chat interface can be exercised on its own before agent orchestration is
+ * wired up. Search for "TEMP" to find and revert each change.
  */
 
 // Import ChatroomApp from the remote theme
@@ -362,10 +367,10 @@ class BoardroomApp extends ChatroomApp {
         // only fires after a successful agent selection.
         this.hideLoading();
 
-        // Require login before anything else touches the API
-        if (!this._isAuthenticated()) {
-            await this._showLoginGate();
-        }
+        // TEMP: auth gate bypassed — chat UI only, agent orchestration wired up later
+        // if (!this._isAuthenticated()) {
+        //     await this._showLoginGate();
+        // }
 
         // Initialize boardroom-specific features
         await this.initializeBoardroom();
@@ -381,10 +386,10 @@ class BoardroomApp extends ChatroomApp {
         // Initialize the CopilotKit runtime client if a URL was provided
         this._initCopilotKit();
 
-        // Load agents if agent profiles are enabled
-        if (this.boardroomConfig.showAgentProfiles) {
-            await this.loadAgents();
-        }
+        // TEMP: agent loading disabled until backend is wired up
+        // if (this.boardroomConfig.showAgentProfiles) {
+        //     await this.loadAgents();
+        // }
 
         // Initialize toggle strip
         if (this.boardroomConfig.showToggleStrip) {
@@ -633,16 +638,16 @@ class BoardroomApp extends ChatroomApp {
     }
 
     /**
-     * Send the current input via the CopilotKit runtime when configured;
-     * otherwise fall back to our own backend's /chat route.
+     * Send the current input.
+     *
+     * TEMP (standalone chat UI testing): both the CopilotKit runtime path
+     * and the backend `/chat` fallback are disabled below in favor of a
+     * local echo, since neither the runtime nor the backend is wired up
+     * yet. Restore the commented-out block below (and remove the stub) once
+     * agent orchestration is ready.
      */
     async sendMessage() {
-        if (this.copilotKit) {
-            await this._sendViaCopilotKit();
-            return;
-        }
-
-        // Fallback: our own backend route (non-streaming)
+        // TEMP: no backend/agent wired up yet — local echo only
         const inputEl = this._getChatInputElement();
         if (!inputEl) return;
 
@@ -660,6 +665,22 @@ class BoardroomApp extends ChatroomApp {
         if (emptyState) emptyState.hidden = true;
 
         this._appendUserMessage(text);
+
+        // Fake a short "thinking" delay then echo back, so the UI feels alive
+        this.showLoading('Waiting for response...');
+        setTimeout(() => {
+            this._appendAgentMessage(`(stub) You said: "${text}"`);
+            this.hideLoading();
+        }, 400);
+
+        /* ── Restore this block once backend/CopilotKit orchestration is ready ──
+
+        if (this.copilotKit) {
+            await this._sendViaCopilotKit();
+            return;
+        }
+
+        // Fallback: our own backend route (non-streaming)
         this.showLoading('Waiting for response...');
 
         try {
@@ -687,6 +708,8 @@ class BoardroomApp extends ChatroomApp {
         } finally {
             this.hideLoading();
         }
+
+        ── end restore block ── */
     }
 
     /**
