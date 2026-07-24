@@ -55,7 +55,15 @@ class BoardroomApp extends ChatroomApp {
         this.copilotKit = null;
 
         // Auth state
-        this.authToken = localStorage.getItem(AUTH_TOKEN_KEY) || null;
+        // Wrapped in try/catch: some browsers' Tracking Prevention / storage
+        // partitioning can throw on localStorage access entirely, which would
+        // otherwise kill the whole module before customElements.define() runs.
+        try {
+            this.authToken = localStorage.getItem(AUTH_TOKEN_KEY) || null;
+        } catch (err) {
+            console.warn('[Boardroom] localStorage unavailable:', err);
+            this.authToken = null;
+        }
     }
 
     // ── Auth: login gate ─────────────────────────────────────────────────
@@ -1063,16 +1071,20 @@ class BoardroomApp extends ChatroomApp {
         }
     }
 
-    showLoading(message = 'Loading...') {
-        if (!this.boardroomElements.loadingOverlay) return;
-
-        this.boardroomElements.loadingOverlay.querySelector('.boardroom-loading-text').textContent = message;
-        this.boardroomElements.loadingOverlay.classList.add('active');
-    }
-
     hideLoading() {
         if (!this.boardroomElements.loadingOverlay) return;
         this.boardroomElements.loadingOverlay.classList.remove('active');
+        // Belt-and-suspenders: some deployments' CSS shows this overlay by
+        // default (display:flex) with no rule that hides it in the absence
+        // of .active, so force it closed directly too.
+        this.boardroomElements.loadingOverlay.style.display = 'none';
+    }
+
+    showLoading(message = 'Loading...') {
+        if (!this.boardroomElements.loadingOverlay) return;
+        this.boardroomElements.loadingOverlay.style.display = '';
+        this.boardroomElements.loadingOverlay.querySelector('.boardroom-loading-text').textContent = message;
+        this.boardroomElements.loadingOverlay.classList.add('active');
     }
 
     showToast(message, type = 'info') {
