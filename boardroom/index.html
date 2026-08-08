@@ -6,8 +6,9 @@ title: AI Boardroom
 description: AI C-suite agents collaborate in real-time to drive strategic decisions, operational reviews, and business governance.
 permalink: /boardroom/
 boardroom:
-  api_base: "/api/boardroom"
-  copilotkit_runtime_url: "https://cloud.businessinfinity.asisaga.com/api/copilotkit"
+  api_base: "https://fa-business-infin-staging-erm2sr.azurewebsites.net/api/boardroom"
+  login_endpoint: "https://fa-business-infin-staging-erm2sr.azurewebsites.net/api/login"
+  ag_ui_endpoint: "https://fa-business-infin-staging-erm2sr.azurewebsites.net/api/copilotkit"
   show_avatar: true
   show_toolbar: true
   show_typing_indicator: true
@@ -22,9 +23,7 @@ boardroom:
   auto_refresh: true
   refresh_interval: 3000
 ---
-
 {% comment %}Chatroom HTML templates — cloned at runtime by boardroom-app-new.js via ChatroomApp{% endcomment %}
-
 <boardroom-app
   title="{{ page.title }}"
   {% if page.boardroom.show_toolbar %}show-toolbar{% endif %}
@@ -37,7 +36,8 @@ boardroom:
   {% if page.boardroom.enable_file_attach %}enable-file-attach{% endif %}
   {% if page.boardroom.enable_formatting %}enable-formatting{% endif %}
   api-base="{{ page.boardroom.api_base }}"
-  copilotkit-runtime-url="{{ page.boardroom.copilotkit_runtime_url }}"
+  login-endpoint="{{ page.boardroom.login_endpoint }}"
+  ag-ui-endpoint="{{ page.boardroom.ag_ui_endpoint }}"
   placeholder="Type your message..."
   {% if page.boardroom.auto_refresh %}auto-refresh refresh-interval="{{ page.boardroom.refresh_interval }}"{% endif %}
 >
@@ -47,14 +47,12 @@ boardroom:
         <div class="boardroom-main-row">
           {% include boardroom/toggle-strip.html %}
           {% include boardroom/members-sidebar.html %}
-
           <!-- Chat Area: populated at runtime by BoardroomApp._render() from chatroom templates -->
           <section id="chatArea" class="boardroom-chat-area" data-panel="main" role="main" aria-label="Chat Area">
           </section>
         </div>
       </div>
     </section>
-
     <!-- Loading overlay -->
     <div class="boardroom-loading-overlay" id="boardroom-loading" role="status" aria-live="polite" aria-label="Loading">
       <div class="boardroom-loading-content">
@@ -62,7 +60,6 @@ boardroom:
         <p class="boardroom-loading-text">Connecting to boardroom...</p>
       </div>
     </div>
-
     <!-- Toast notifications -->
     <div class="boardroom-toast-container" id="boardroom-toasts" aria-live="polite" aria-atomic="true"></div>
   </main>
@@ -72,5 +69,4 @@ boardroom:
     JavaScript is required for the live boardroom experience. Please enable JavaScript to interact with AI agents and collaborate in real time.
   </div>
 </noscript>
-
 <script type="module" src="{{ '/assets/js/boardroom-app-new.js' | relative_url }}"></script>
