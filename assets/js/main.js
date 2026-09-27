@@ -18,7 +18,7 @@
  * new code rather than relying on side effects or globals.
  */
 import './boardroom/sidebar-element.js';
-import './boardroom-app.js';
+//import './boardroom-app.js';
 import './dashboard-panel.js';
 import './mentor-element.js';
 // `app-utils.js` is imported where needed (initializer imports it explicitly)
