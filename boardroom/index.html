@@ -1,5 +1,7 @@
 ---
 layout: chatroom
+component: boardroom-app
+module_js: boardroom-app-new.js
 body_class: chatroom-body
 main_class: chatroom-main
 title: Boardroom
@@ -23,54 +25,47 @@ boardroom:
   refresh_interval: 3000
 ---
 
-{% comment %}Chatroom HTML templates — cloned at runtime by boardroom-app-new.js via ChatroomApp{% endcomment %}
+{% comment %}
+  Boardroom page — lean by design.
+  ==================================
+  All chrome (header, toggle strip, members sidebar, #chatArea render
+  target, shared message templates) is provided by the chatroom layout —
+  see _layouts/chatroom.html. This page supplies only:
+    - front matter mapped to <boardroom-app> attributes by the layout
+    - the loading overlay and toast container, which are
+      boardroom-specific UI (not part of the generic chatroom shell)
 
-<boardroom-app
-  title="{{ page.title }}"
-  {% if page.boardroom.show_toolbar %}show-toolbar{% endif %}
-  {% if page.boardroom.show_connection_status %}show-connection-status{% endif %}
-  {% if page.boardroom.show_toggle_strip %}show-toggle-strip{% endif %}
-  {% if page.boardroom.show_members_sidebar %}show-members-sidebar{% endif %}
-  {% if page.boardroom.show_agent_profiles %}show-agent-profiles{% endif %}
-  {% if page.boardroom.enable_screen_share %}enable-screen-share{% endif %}
-  {% if page.boardroom.enable_video_call %}enable-video-call{% endif %}
-  {% if page.boardroom.enable_file_attach %}enable-file-attach{% endif %}
-  {% if page.boardroom.enable_formatting %}enable-formatting{% endif %}
-  api-base="{{ page.boardroom.api_base }}"
-  copilotkit-runtime-url="{{ page.boardroom.copilotkit_runtime_url }}"
-  placeholder="Type your message..."
-  {% if page.boardroom.auto_refresh %}auto-refresh refresh-interval="{{ page.boardroom.refresh_interval }}"{% endif %}
+  boardroom-app.js (BoardroomApp extends ChatroomApp) supplies all
+  behavior: auth gate, agent loading, populating the members sidebar's
+  mount point with agent data, CopilotKit/AG-UI streaming, and the extra
+  header/toolbar buttons via the _onLayoutBuilt / _onInputBuilt extension
+  hooks.
+{% endcomment %}
+
+<div
+  class="boardroom-loading-overlay"
+  id="boardroom-loading"
+  role="status"
+  aria-live="polite"
+  aria-label="Loading"
 >
-  <main class="boardroom-container">
-    <section class="boardroom-section" aria-label="Boardroom Interface">
-      <div class="boardroom-container-fluid">
-        <div class="boardroom-main-row">
-          {% include boardroom/toggle-strip.html %}
-          {% include boardroom/members-sidebar.html %}
+  <div class="boardroom-loading-content">
+    <div class="boardroom-loading-spinner"></div>
+    <p class="boardroom-loading-text">Connecting to boardroom...</p>
+  </div>
+</div>
 
-          <!-- Chat Area: populated at runtime by BoardroomApp._render() from chatroom templates -->
-          <section id="chatArea" class="boardroom-chat-area" data-panel="main" role="main" aria-label="Chat Area">
-          </section>
-        </div>
-      </div>
-    </section>
+<div
+  class="boardroom-toast-container"
+  id="boardroom-toasts"
+  aria-live="polite"
+  aria-atomic="true"
+></div>
 
-    <!-- Loading overlay -->
-    <div class="boardroom-loading-overlay" id="boardroom-loading" role="status" aria-live="polite" aria-label="Loading">
-      <div class="boardroom-loading-content">
-        <div class="boardroom-loading-spinner"></div>
-        <p class="boardroom-loading-text">Connecting to boardroom...</p>
-      </div>
-    </div>
-
-    <!-- Toast notifications -->
-    <div class="boardroom-toast-container" id="boardroom-toasts" aria-live="polite" aria-atomic="true"></div>
-  </main>
-</boardroom-app>
 <noscript>
   <div class="boardroom-noscript">
-    JavaScript is required for the live boardroom experience. Please enable JavaScript to interact with AI agents and collaborate in real time.
+    JavaScript is required for the live boardroom experience. Please
+    enable JavaScript to interact with AI agents and collaborate in real
+    time.
   </div>
 </noscript>
-
-<script type="module" src="{{ '/assets/js/boardroom-app-new.js' | relative_url }}"></script>

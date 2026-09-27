@@ -1,9 +1,27 @@
 /**
  * Boardroom Web Component
- * Extends the generic chatroom for business-specific features.
- * Includes: agent list, profiles, toggle strip, members sidebar.
  *
- * Chat messages are now routed through our own Azure Function backend
+ * Thin extension of the generic ChatroomApp: adds business-specific
+ * behavior (auth gate, agent loading, CopilotKit/AG-UI streaming, extra
+ * header/toolbar buttons) on top of ChatroomApp's inherited rendering.
+ *
+ * BoardroomApp does NOT override _render() or reimplement message
+ * rendering — all chat UI (header, messages, input) is rendered by the
+ * inherited ChatroomApp._render() into the generic #chatArea, using the
+ * chatroom__* message templates. BoardroomApp only adds to that layout via
+ * the _onLayoutBuilt / _onInputBuilt extension hooks.
+ *
+ * The toggle strip and members sidebar shells are static HTML provided by
+ * the chatroom layout (_includes/chatroom/toggle-strip.html and
+ * members-sidebar.html) and their show/hide + search/filter behavior is
+ * owned entirely by chatroom-panels.js. BoardroomApp's only responsibility
+ * toward these panels is populating the members list's mount point
+ * (#chatroomMembersList) with agent data, per the data contract:
+ *   <li class="chatroom-members-sidebar__item"
+ *       data-status="online|away|offline"
+ *       data-name="lowercase searchable name">
+ *
+ * Chat messages are routed through our own Azure Function backend
  * (`${apiBase}/chat`) which forwards to the Azure AI Foundry agent.
  * The CopilotKit runtime path is left in place but no longer called
  * automatically — see `sendMessage()` below.
@@ -162,94 +180,33 @@ class BoardroomApp extends ChatroomApp {
         return response;
     }
 
+    // ── Rendering hooks (called by inherited ChatroomApp._render()) ───────
+
     /**
-     * Override _render() from ChatroomApp to inject the chatroom layout into the
-     * boardroom's `#chatArea` container instead of replacing all children of this
-     * element.  This preserves the boardroom-specific wrappers (toggle strip,
-     * members sidebar, loading overlay, toast container) that live alongside the
-     * chat area in the static HTML.
-     *
-     * Boardroom-specific header actions (Screen Share, Video Call, etc.) are
-     * appended to the chatroom header's actions container after the template is
-     * cloned and populated.
+     * Extension hook from ChatroomApp._render(): add boardroom-specific
+     * toolbar buttons (formatting, file attach) to the cloned input bar
+     * before it's appended to the layout.
+     * @param {Element} inputEl  The cloned chatroom-input element.
      */
-    _render() {
-        const { title, participants, placeholder, showToolbar, showConnectionStatus, mcpApps, chatMessages = [] } = this.config;
-
-        const layout = this._cloneTemplate('template-chatroom-layout');
-        if (!layout) return;
-
-        // Populate title
-        const titleEl = layout.querySelector('.chatroom-title');
-        if (titleEl) titleEl.textContent = title;
-
-        // Conditionally show participants count
-        const participantsEl = layout.querySelector('.chatroom-participants');
-        if (participantsEl && participants) {
-            participantsEl.textContent = `${participants} agents in session`;
-            participantsEl.hidden = false;
+    _onInputBuilt(inputEl) {
+        super._onInputBuilt(inputEl);
+        if (this.boardroomConfig.enableFormatting) {
+            this._addBoardroomToolbarButtons(inputEl);
         }
-
-        // Conditionally show connection status badge
-        const statusContainer = layout.querySelector('.chatroom-status-container');
-        if (statusContainer && showConnectionStatus) {
-            statusContainer.hidden = false;
+        if (this.boardroomConfig.enableFileAttach) {
+            this._addFileAttachButton(inputEl);
         }
+    }
 
-        // Conditionally show MCP apps toggle button in the header
-        const mcpToggle = layout.querySelector('.chatroom-mcp-apps-toggle');
-        if (mcpToggle && mcpApps.length > 0) {
-            mcpToggle.hidden = false;
-        }
-
-        // Insert MCP apps panel before the messages container
-        if (mcpApps.length > 0) {
-            const panel = this._buildMcpPanel(mcpApps);
-            if (panel) {
-                const messagesEl = layout.querySelector('.chatroom-messages');
-                if (messagesEl) layout.insertBefore(panel, messagesEl);
-            }
-        }
-
-        // Populate messages container with pre-loaded data
-        const messagesEl = layout.querySelector('.chatroom-messages');
-        if (messagesEl && chatMessages.length > 0) {
-            messagesEl.replaceChildren();
-            chatMessages.forEach(m => {
-                const el = this._buildMessage(m);
-                if (el) messagesEl.appendChild(el);
-            });
-        }
-
-        // Add boardroom-specific header actions (Screen Share, Video Call, etc.)
+    /**
+     * Extension hook from ChatroomApp._render(): add boardroom-specific
+     * header action buttons (Screen Share, Video Call, More Options)
+     * before the assembled layout is inserted into the DOM.
+     * @param {Element} layout  The assembled chatroom-layout element.
+     */
+    _onLayoutBuilt(layout) {
+        super._onLayoutBuilt(layout);
         this._addBoardroomHeaderActions(layout);
-
-        // Insert input area at the end of the layout
-        const inputEl = this._buildInput(placeholder, showToolbar, mcpApps);
-        if (inputEl) {
-            // Add boardroom-specific toolbar buttons when formatting is enabled
-            if (this.boardroomConfig.enableFormatting) {
-                this._addBoardroomToolbarButtons(inputEl);
-            }
-            // Add file attach button to the toolbar
-            if (this.boardroomConfig.enableFileAttach) {
-                this._addFileAttachButton(inputEl);
-            }
-            layout.appendChild(inputEl);
-        }
-
-        // Inject into the boardroom chat area container only, preserving the
-        // surrounding boardroom layout (toggle strip, members sidebar, etc.)
-        const chatArea = this.querySelector('#chatArea');
-        if (chatArea) {
-            chatArea.replaceChildren(layout);
-        } else {
-            // Fallback: replace all children (same as ChatroomApp default)
-            this.replaceChildren(layout);
-        }
-
-        // Scroll to bottom of any pre-loaded messages
-        if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
     }
 
     /**
@@ -365,8 +322,11 @@ class BoardroomApp extends ChatroomApp {
         }
     }
 
+    // ── Lifecycle ────────────────────────────────────────────────────────
+
     async connectedCallback() {
-        // Call parent connectedCallback
+        // Call parent connectedCallback — this runs the inherited _render(),
+        // which calls our _onLayoutBuilt / _onInputBuilt hooks above.
         await super.connectedCallback();
 
         // Hide the initial loading overlay now that the layout has rendered —
@@ -399,17 +359,9 @@ class BoardroomApp extends ChatroomApp {
         //     await this.loadAgents();
         // }
 
-        // Initialize toggle strip
-        if (this.boardroomConfig.showToggleStrip) {
-            this.initializeToggleStrip();
-        }
-
-        // Initialize members sidebar
-        if (this.boardroomConfig.showMembersSidebar) {
-            this.initializeMembersSidebar();
-        }
-
-        // Attach boardroom-specific event handlers
+        // Attach boardroom-specific event handlers (screen share, video
+        // call, file attach — NOT toggle-strip/sidebar behavior, which is
+        // owned entirely by chatroom-panels.js)
         this.attachBoardroomEventHandlers();
     }
 
@@ -441,24 +393,35 @@ class BoardroomApp extends ChatroomApp {
     }
 
     initializeElements() {
-        // Call parent initializeElements
+        // Call parent initializeElements — sets up this.elements against
+        // the inherited chatroom-* selectors (title, messagesContainer,
+        // inputField, etc.)
         super.initializeElements();
 
-        // Get boardroom-specific elements
+        // Get boardroom-specific elements. Note: toggle strip and members
+        // sidebar are the shared generic panels from the chatroom layout
+        // (see _includes/chatroom/toggle-strip.html and
+        // members-sidebar.html) — their IDs are chatroom-prefixed, not
+        // boardroom-prefixed, since chatroom-panels.js owns their
+        // show/hide and filter behavior generically.
         this.boardroomElements = {
-            toggleStrip: this.querySelector('.boardroom-members-sidebar-toggle-strip') || this.querySelector('.boardroom-toggle-strip'),
-            membersSidebar: this.querySelector('.boardroom-members-sidebar'),
-            agentList: this.querySelector('#membersListContainer'),
-            chatArea: this.querySelector('.boardroom-chat-area'),
+            membersList: this.querySelector('#chatroomMembersList'),
+            membersCount: this.querySelector('#chatroomMembersCount'),
             profileDetail: this.querySelector('[data-boardroom-region="profile"]') || this.querySelector('#profile-detail'),
             loadingOverlay: this.querySelector('.boardroom-loading-overlay'),
-            toastContainer: this.querySelector('.boardroom-toast-container')
+            toastContainer: this.querySelector('.boardroom-toast-container'),
         };
     }
 
+    /**
+     * Attach boardroom-specific event handlers. Deliberately does NOT wire
+     * up the toggle strip or members-sidebar search/filter — those are
+     * owned entirely by chatroom-panels.js against the generic panel
+     * markup. Wiring them here too would double-bind the same buttons.
+     */
     attachBoardroomEventHandlers() {
-        if (this.boardroomElements.agentList) {
-            this.boardroomElements.agentList.addEventListener('click', (e) => {
+        if (this.boardroomElements.membersList) {
+            this.boardroomElements.membersList.addEventListener('click', (e) => {
                 const agentItem = e.target.closest('[data-agent-id]');
                 if (agentItem) {
                     const agentId = agentItem.dataset.agentId;
@@ -483,42 +446,7 @@ class BoardroomApp extends ChatroomApp {
         }
     }
 
-    initializeToggleStrip() {
-        if (!this.boardroomElements.toggleStrip) return;
-
-        const toggleButtons = this.boardroomElements.toggleStrip.querySelectorAll('[data-toggle-view]');
-        toggleButtons.forEach(button => {
-            button.addEventListener('click', () => {
-                const view = button.dataset.toggleView;
-                this.toggleView(view);
-            });
-        });
-
-        const membersToggleBtn = this.querySelector('#toggleMembersBtn');
-        if (membersToggleBtn && this.boardroomElements.membersSidebar) {
-            membersToggleBtn.addEventListener('click', () => {
-                const willHide = !this.boardroomElements.membersSidebar.classList.contains('hidden');
-                this.boardroomElements.membersSidebar.classList.toggle('hidden', willHide);
-                membersToggleBtn.setAttribute('aria-expanded', (!willHide).toString());
-
-                const icon = this.querySelector('#membersSidebarToggleIcon img');
-                if (icon) {
-                    icon.setAttribute('alt', willHide ? 'Expand' : 'Collapse');
-                }
-            });
-        }
-    }
-
-    initializeMembersSidebar() {
-        if (!this.boardroomElements.membersSidebar) return;
-
-        const searchInput = this.boardroomElements.membersSidebar.querySelector('.boardroom-search-input');
-        if (searchInput) {
-            searchInput.addEventListener('input', (e) => {
-                this.filterMembers(e.target.value);
-            });
-        }
-    }
+    // ── Agents / members list ───────────────────────────────────────────
 
     async loadAgents() {
         try {
@@ -533,37 +461,73 @@ class BoardroomApp extends ChatroomApp {
         }
     }
 
+    /**
+     * Populate the generic members sidebar's mount point (#chatroomMembersList)
+     * with one <li> per agent, following the data contract that
+     * chatroom-panels.js's search/filter logic expects:
+     *   class="chatroom-members-sidebar__item"
+     *   data-status="online|away|offline"
+     *   data-name="<lowercase name, for search matching>"
+     * chatroom-panels.js observes this list via MutationObserver and
+     * re-applies the current filter automatically after this runs.
+     */
     renderAgents() {
-        if (!this.boardroomElements.agentList) return;
+        if (!this.boardroomElements.membersList) return;
 
-        this.boardroomElements.agentList.innerHTML = '';
+        this.boardroomElements.membersList.replaceChildren();
 
-        this.agents.forEach(agent => {
-            const agentItem = document.createElement('div');
-            agentItem.className = 'boardroom-agent-item';
-            agentItem.dataset.agentId = agent.agentId;
-            agentItem.innerHTML = `
-        <img src="${agent.avatar}" alt="${agent.name}" class="boardroom-agent-avatar">
-        <div class="boardroom-agent-info">
-          <div class="boardroom-agent-name">${agent.name}</div>
-          <div class="boardroom-agent-role">${agent.role}</div>
-        </div>
-        <span class="boardroom-agent-status ${agent.online ? 'online' : 'offline'}"></span>
-      `;
-            this.boardroomElements.agentList.appendChild(agentItem);
+        this.agents.forEach((agent) => {
+            const item = document.createElement('li');
+            item.className = 'chatroom-members-sidebar__item';
+            item.dataset.agentId = agent.agentId;
+            item.dataset.status = agent.online ? 'online' : 'offline';
+            item.dataset.name = (agent.name || '').toLowerCase();
+
+            const avatar = document.createElement('img');
+            avatar.src = agent.avatar;
+            avatar.alt = agent.name;
+            avatar.className = 'chatroom-members-sidebar__item-avatar';
+
+            const info = document.createElement('div');
+            info.className = 'chatroom-members-sidebar__item-info';
+
+            const name = document.createElement('div');
+            name.className = 'chatroom-members-sidebar__item-name';
+            name.textContent = agent.name;
+
+            const role = document.createElement('div');
+            role.className = 'chatroom-members-sidebar__item-role';
+            role.textContent = agent.role;
+
+            info.appendChild(name);
+            info.appendChild(role);
+
+            const status = document.createElement('span');
+            status.className = `chatroom-members-sidebar__item-status chatroom-members-sidebar__item-status--${item.dataset.status}`;
+
+            item.appendChild(avatar);
+            item.appendChild(info);
+            item.appendChild(status);
+
+            this.boardroomElements.membersList.appendChild(item);
         });
+
+        if (this.boardroomElements.membersCount) {
+            const onlineCount = this.agents.filter((a) => a.online).length;
+            this.boardroomElements.membersCount.textContent = `${onlineCount} online`;
+        }
     }
 
     async selectAgent(agentId) {
         this.showLoading('Connecting to agent...');
 
         try {
-            this.boardroomElements.agentList.querySelectorAll('.boardroom-agent-item').forEach(item => {
-                item.classList.remove('active');
+            this.boardroomElements.membersList.querySelectorAll('.chatroom-members-sidebar__item').forEach((item) => {
+                item.classList.remove('chatroom-members-sidebar__item--active');
             });
-            const selectedItem = this.boardroomElements.agentList.querySelector(`[data-agent-id="${agentId}"]`);
+            const selectedItem = this.boardroomElements.membersList.querySelector(`[data-agent-id="${agentId}"]`);
             if (selectedItem) {
-                selectedItem.classList.add('active');
+                selectedItem.classList.add('chatroom-members-sidebar__item--active');
             }
 
             this.currentAgent = this.agents.find(a => a.agentId === agentId);
@@ -620,66 +584,44 @@ class BoardroomApp extends ChatroomApp {
     `;
     }
 
-    toggleView(view) {
-        this.dispatchEvent(new CustomEvent('boardroom-view-change', {
-            bubbles: true,
-            detail: { view }
-        }));
-
-        if (view === 'chat') {
-            this.boardroomElements.chatArea?.classList.remove('hidden');
-            this.boardroomElements.profileDetail?.classList.add('hidden');
-        } else if (view === 'profile') {
-            this.boardroomElements.chatArea?.classList.add('hidden');
-            this.boardroomElements.profileDetail?.classList.remove('hidden');
-        }
+    /**
+     * Clear the message list. Delegates to the inherited ChatroomApp
+     * message container rather than a boardroom-specific one.
+     */
+    _clearMessages() {
+        const messagesEl = this.elements?.messagesContainer;
+        if (!messagesEl) return;
+        messagesEl.replaceChildren();
+        const emptyState = document.createElement('div');
+        emptyState.className = 'chatroom-empty-state';
+        emptyState.textContent = 'No messages yet. Start the conversation!';
+        messagesEl.appendChild(emptyState);
     }
 
-    filterMembers(query) {
-        const lowerQuery = query.toLowerCase();
-        this.boardroomElements.agentList.querySelectorAll('.boardroom-agent-item').forEach(item => {
-            const name = item.querySelector('.boardroom-agent-name').textContent.toLowerCase();
-            const role = item.querySelector('.boardroom-agent-role').textContent.toLowerCase();
-            const matches = name.includes(lowerQuery) || role.includes(lowerQuery);
-            item.style.display = matches ? '' : 'none';
-        });
-    }
+    // ── Sending messages ─────────────────────────────────────────────────
 
     /**
      * Send the current input.
      *
-     * TEMP (standalone chat UI testing): both the CopilotKit runtime path
-     * and the backend `/chat` fallback are disabled below in favor of a
-     * local echo, since neither the runtime nor the backend is wired up
-     * yet. Restore the commented-out block below (and remove the stub) once
-     * agent orchestration is ready.
+     * Routes through CopilotKit when configured; otherwise falls back to
+     * the inherited ChatroomApp.sendMessage(), which already handles
+     * slash-commands/MCP apps and posting to config.apiEndpoint (or a
+     * local echo when no apiEndpoint is set) using the inherited
+     * chatroom__* message rendering.
+     *
+     * TEMP (standalone chat UI testing): CopilotKit and the backend fallback
+     * are both bypassed below in favor of a local echo, since neither is
+     * wired up yet. Restore the commented-out block once agent
+     * orchestration is ready.
      */
     async sendMessage() {
-        // TEMP: no backend/agent wired up yet — local echo only
-        const inputEl = this._getChatInputElement();
-        if (!inputEl) return;
-
-        const text = inputEl.value.trim();
-        if (!text) return;
-
-        inputEl.value = '';
-        this._updateCharCount(inputEl);
-
-        const messagesEl = (this.elements && this.elements.messagesContainer)
-            || this.querySelector('.chatroom-messages');
-        const emptyState = messagesEl
-            ? messagesEl.querySelector('.chatroom-empty-state')
-            : this.querySelector('.chatroom-empty-state');
-        if (emptyState) emptyState.hidden = true;
-
-        this._appendUserMessage(text);
-
-        // Fake a short "thinking" delay then echo back, so the UI feels alive
-        this.showLoading('Waiting for response...');
-        setTimeout(() => {
-            this._appendAgentMessage(`(stub) You said: "${text}"`);
-            this.hideLoading();
-        }, 400);
+        // TEMP: no backend/agent wired up yet — local echo only, using the
+        // inherited chatroom__* message rendering via _buildDomainUserMsg /
+        // _buildOwnMsg (through the parent's own _appendUserMessage-equivalent
+        // path). We call super.sendMessage() directly since ChatroomApp
+        // already falls back to a local echo when config.apiEndpoint is unset.
+        await super.sendMessage();
+        return;
 
         /* ── Restore this block once backend/CopilotKit orchestration is ready ──
 
@@ -688,34 +630,7 @@ class BoardroomApp extends ChatroomApp {
             return;
         }
 
-        // Fallback: our own backend route (non-streaming)
-        this.showLoading('Waiting for response...');
-
-        try {
-            const response = await this._authedFetch(`${this.boardroomConfig.apiBase}/chat`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    message: text,
-                    agentId: this.currentAgent?.agentId ?? null,
-                    conversationId: this.conversationId ?? null,
-                }),
-            });
-
-            if (!response.ok) {
-                const errBody = await response.json().catch(() => ({}));
-                throw new Error(errBody.error || `Request failed (${response.status})`);
-            }
-
-            const data = await response.json();
-            const replyText = data.message || data.reply || data.text || JSON.stringify(data);
-            this._appendAgentMessage(replyText);
-        } catch (error) {
-            console.error('[Boardroom] sendMessage failed:', error);
-            this.showToast('Failed to get a response — please try again', 'error');
-        } finally {
-            this.hideLoading();
-        }
+        await super.sendMessage();
 
         ── end restore block ── */
     }
@@ -725,23 +640,34 @@ class BoardroomApp extends ChatroomApp {
      * Renders a user bubble immediately, then streams the AI response token-by-token.
      */
     async _sendViaCopilotKit() {
-        const inputEl = this._getChatInputElement();
+        const inputEl = this.elements?.inputField;
         if (!inputEl) return;
 
         const text = inputEl.value.trim();
         if (!text) return;
 
         inputEl.value = '';
-        this._updateCharCount(inputEl);
+        if (this.elements.charCount) {
+            this.elements.charCount.textContent = `0/${this.config.maxLength}`;
+        }
 
-        const messagesEl = (this.elements && this.elements.messagesContainer)
-            || this.querySelector('.chatroom-messages');
-        const emptyState = messagesEl
-            ? messagesEl.querySelector('.chatroom-empty-state')
-            : this.querySelector('.chatroom-empty-state');
+        const messagesEl = this.elements?.messagesContainer;
+        const emptyState = messagesEl?.querySelector('.chatroom-empty-state');
         if (emptyState) emptyState.hidden = true;
 
-        this._appendUserMessage(text);
+        // Use the inherited domain/own-message builder so streamed
+        // conversations render with the same chatroom__* markup as
+        // everything else.
+        const el = this._buildDomainUserMsg(text) ?? this._buildOwnMsg({
+            text,
+            time: this._formatNow(),
+            author: 'You',
+            initials: 'Y',
+        });
+        if (el && messagesEl) {
+            messagesEl.appendChild(el);
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+        }
 
         try {
             await this.copilotKit.sendMessage(text, {
@@ -756,138 +682,11 @@ class BoardroomApp extends ChatroomApp {
         }
     }
 
-    // ── DOM helpers ──────────────────────────────────────────────────────
-
-    /** Get the chat textarea element */
-    _getChatInputElement() {
-        return (
-            (this.elements && this.elements.inputField) ||
-            this.querySelector('.chatroom-input-field') ||
-            this.querySelector('textarea[name="message"]') ||
-            this.querySelector('#chat-input') ||
-            this.querySelector('textarea')
-        );
-    }
-
-    /** Update character-count display after clearing input */
-    _updateCharCount(inputEl) {
-        const counter = (this.elements && this.elements.charCount)
-            || this.querySelector('.chatroom-char-count');
-        if (counter) {
-            counter.textContent = `0/${inputEl.maxLength > 0 ? inputEl.maxLength : (this.config.maxLength || 1000)}`;
-        }
-    }
-
-    /** Clear all messages from the chat area */
-    _clearMessages() {
-        const messagesEl = (this.elements && this.elements.messagesContainer)
-            || this.querySelector('.chatroom-messages');
-        if (messagesEl) {
-            messagesEl.replaceChildren();
-            const emptyState = messagesEl.querySelector('.chatroom-empty-state');
-            if (emptyState) emptyState.hidden = false;
-        }
-    }
-
-    /** Append the user's own message bubble to the chat */
-    _appendUserMessage(text) {
-        const messagesEl = (this.elements && this.elements.messagesContainer)
-            || this.querySelector('.chatroom-messages');
-        if (!messagesEl) return;
-
-        const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-
-        const article = document.createElement('article');
-        article.className = 'boardroom-message-row flex-row-reverse';
-        article.setAttribute('aria-label', 'Your message');
-
-        const contentDiv = document.createElement('div');
-        contentDiv.className = 'boardroom-message-content';
-
-        const bubble = document.createElement('div');
-        bubble.className = 'boardroom-message-bubble bg-primary text-white';
-        bubble.textContent = text;
-
-        const metaDiv = document.createElement('div');
-        metaDiv.className = 'boardroom-message-meta boardroom-message-meta-sent';
-
-        const timestamp = document.createElement('span');
-        timestamp.className = 'boardroom-message-timestamp';
-        timestamp.textContent = time;
-
-        metaDiv.appendChild(timestamp);
-        contentDiv.appendChild(bubble);
-        contentDiv.appendChild(metaDiv);
-        article.appendChild(contentDiv);
-        messagesEl.appendChild(article);
-        messagesEl.scrollTop = messagesEl.scrollHeight;
-    }
-
-    /** Append a completed agent reply bubble (non-streaming) */
-    _appendAgentMessage(text) {
-        const messagesEl = (this.elements && this.elements.messagesContainer)
-            || this.querySelector('.chatroom-messages');
-        if (!messagesEl) return;
-
-        const agent = this.currentAgent?.name || 'AI';
-        const role = this.currentAgent?.role || 'AI Assistant';
-        const avatar = this.currentAgent?.avatar || '';
-        const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-
-        const article = document.createElement('article');
-        article.className = 'boardroom-message-row';
-        article.setAttribute('aria-label', `Message from ${agent}`);
-
-        const avatarBlock = document.createElement('div');
-        avatarBlock.className = 'boardroom-message-avatar-block';
-
-        if (avatar) {
-            const img = document.createElement('img');
-            img.src = avatar;
-            img.alt = agent;
-            img.className = 'boardroom-message-avatar';
-            img.width = 40;
-            img.height = 40;
-            avatarBlock.appendChild(img);
-        }
-
-        const avatarMeta = document.createElement('div');
-        avatarMeta.className = 'boardroom-message-avatar-meta';
-
-        const nameSpan = document.createElement('span');
-        nameSpan.className = 'boardroom-message-avatar-name';
-        nameSpan.textContent = agent;
-        avatarMeta.appendChild(nameSpan);
-        avatarMeta.appendChild(document.createElement('br'));
-
-        const roleSpan = document.createElement('span');
-        roleSpan.className = 'boardroom-message-avatar-role';
-        roleSpan.textContent = role;
-        avatarMeta.appendChild(roleSpan);
-        avatarBlock.appendChild(avatarMeta);
-
-        const contentDiv = document.createElement('div');
-        contentDiv.className = 'boardroom-message-content';
-
-        const bubble = document.createElement('div');
-        bubble.className = 'boardroom-message-bubble bg-white text-dark';
-        bubble.textContent = text;
-
-        const metaDiv = document.createElement('div');
-        metaDiv.className = 'boardroom-message-meta boardroom-message-meta-received';
-
-        const timeSpan = document.createElement('span');
-        timeSpan.className = 'boardroom-message-timestamp';
-        timeSpan.textContent = time;
-        metaDiv.appendChild(timeSpan);
-
-        contentDiv.appendChild(bubble);
-        contentDiv.appendChild(metaDiv);
-        article.appendChild(avatarBlock);
-        article.appendChild(contentDiv);
-        messagesEl.appendChild(article);
-        messagesEl.scrollTop = messagesEl.scrollHeight;
-    }
+    // ── CopilotKit streaming message helpers ────────────────────────────
+    // These build/update chatroom__* message elements (the same templates
+    // ChatroomApp itself uses) so streamed CopilotKit responses look
+    // identical to non-streamed agent messages. They do not introduce a
+    // second message vocabulary.
 
     /**
      * Create a new AI streaming bubble when the CopilotKit runtime starts a message.
@@ -895,73 +694,47 @@ class BoardroomApp extends ChatroomApp {
      * @param {string} [agentName] - Display name of the responding agent
      */
     _createStreamingBubble(messageId, agentName) {
-        const messagesEl = (this.elements && this.elements.messagesContainer)
-            || this.querySelector('.chatroom-messages');
+        const messagesEl = this.elements?.messagesContainer;
         if (!messagesEl) return;
+
+        const el = this._cloneDomainAgentTemplate();
+        if (!el) return;
+
+        el.id = `copilotkit-msg-${messageId}`;
 
         const agent = agentName || this.currentAgent?.name || 'AI';
         const role = this.currentAgent?.role || 'AI Assistant';
-        const avatar = this.currentAgent?.avatar || '';
 
-        const article = document.createElement('article');
-        article.className = 'boardroom-message-row';
-        article.id = `copilotkit-msg-${messageId}`;
-        article.setAttribute('aria-label', `Message from ${agent}`);
-
-        const avatarBlock = document.createElement('div');
-        avatarBlock.className = 'boardroom-message-avatar-block';
-
-        if (avatar) {
-            const img = document.createElement('img');
-            img.src = avatar;
-            img.alt = agent;
-            img.className = 'boardroom-message-avatar';
-            img.width = 40;
-            img.height = 40;
-            avatarBlock.appendChild(img);
+        const avatarEl = el.querySelector('.chatroom__avatar');
+        if (avatarEl) {
+            avatarEl.classList.add('chatroom__avatar--ai');
         }
 
-        const avatarMeta = document.createElement('div');
-        avatarMeta.className = 'boardroom-message-avatar-meta';
+        const authorEl = el.querySelector('.chatroom__author');
+        if (authorEl) {
+            authorEl.textContent = agent;
+            authorEl.hidden = false;
+        }
 
-        const nameSpan = document.createElement('span');
-        nameSpan.className = 'boardroom-message-avatar-name';
-        nameSpan.textContent = agent;
-        avatarMeta.appendChild(nameSpan);
-        avatarMeta.appendChild(document.createElement('br'));
+        const roleEl = el.querySelector('.chatroom__agent-role');
+        if (roleEl) {
+            roleEl.textContent = role;
+            roleEl.hidden = false;
+        }
 
-        const roleSpan = document.createElement('span');
-        roleSpan.className = 'boardroom-message-avatar-role';
-        roleSpan.textContent = role;
-        avatarMeta.appendChild(roleSpan);
-        avatarBlock.appendChild(avatarMeta);
+        const textEl = el.querySelector('.chatroom__text');
+        if (textEl) {
+            textEl.id = `copilotkit-bubble-${messageId}`;
+            textEl.textContent = '';
+        }
 
-        const contentDiv = document.createElement('div');
-        contentDiv.className = 'boardroom-message-content';
+        const timeEl = el.querySelector('.chatroom__time');
+        if (timeEl) {
+            timeEl.id = `copilotkit-time-${messageId}`;
+            timeEl.hidden = false;
+        }
 
-        const bubble = document.createElement('div');
-        bubble.className = 'boardroom-message-bubble bg-white text-dark';
-        bubble.id = `copilotkit-bubble-${messageId}`;
-
-        const cursor = document.createElement('span');
-        cursor.className = 'boardroom-streaming-cursor';
-        cursor.textContent = '▍';
-        bubble.appendChild(cursor);
-
-        const metaDiv = document.createElement('div');
-        metaDiv.className = 'boardroom-message-meta boardroom-message-meta-received';
-
-        const timeSpan = document.createElement('span');
-        timeSpan.className = 'boardroom-message-timestamp';
-        timeSpan.id = `copilotkit-time-${messageId}`;
-        timeSpan.textContent = '…';
-        metaDiv.appendChild(timeSpan);
-
-        contentDiv.appendChild(bubble);
-        contentDiv.appendChild(metaDiv);
-        article.appendChild(avatarBlock);
-        article.appendChild(contentDiv);
-        messagesEl.appendChild(article);
+        messagesEl.appendChild(el);
         messagesEl.scrollTop = messagesEl.scrollHeight;
     }
 
@@ -971,21 +744,12 @@ class BoardroomApp extends ChatroomApp {
      * @param {string} messageId - ID matching the bubble created by _createStreamingBubble
      */
     _appendStreamChunk(chunk, messageId) {
-        const bubble = this.querySelector(`#copilotkit-bubble-${messageId}`);
-        if (!bubble) return;
+        const textEl = this.querySelector(`#copilotkit-bubble-${messageId}`);
+        if (!textEl) return;
 
-        const cursor = bubble.querySelector('.boardroom-streaming-cursor');
-        if (cursor) cursor.remove();
+        textEl.appendChild(document.createTextNode(chunk));
 
-        bubble.appendChild(document.createTextNode(chunk));
-
-        const newCursor = document.createElement('span');
-        newCursor.className = 'boardroom-streaming-cursor';
-        newCursor.textContent = '▍';
-        bubble.appendChild(newCursor);
-
-        const messagesEl = (this.elements && this.elements.messagesContainer)
-            || this.querySelector('.chatroom-messages');
+        const messagesEl = this.elements?.messagesContainer;
         if (messagesEl) {
             messagesEl.scrollTop = messagesEl.scrollHeight;
         }
@@ -993,38 +757,28 @@ class BoardroomApp extends ChatroomApp {
 
     /**
      * Finalize a streaming AI bubble once the message is complete.
-     * Removes the cursor and adds the timestamp.
      * @param {string} messageId
      * @param {string} fullContent - Complete response text
      */
     _finalizeStreamingBubble(messageId, fullContent) {
-        const bubble = this.querySelector(`#copilotkit-bubble-${messageId}`);
-        if (bubble) {
-            const cursor = bubble.querySelector('.boardroom-streaming-cursor');
-            if (cursor) cursor.remove();
-
-            if (bubble.textContent.trim() !== fullContent.trim()) {
-                bubble.textContent = '';
-                bubble.appendChild(document.createTextNode(fullContent));
-            }
+        const textEl = this.querySelector(`#copilotkit-bubble-${messageId}`);
+        if (textEl && textEl.textContent.trim() !== fullContent.trim()) {
+            textEl.textContent = fullContent;
         }
 
         const timeEl = this.querySelector(`#copilotkit-time-${messageId}`);
         if (timeEl) {
-            timeEl.textContent = new Date().toLocaleTimeString([], {
-                hour: '2-digit',
-                minute: '2-digit',
-            });
+            timeEl.textContent = this._formatNow();
         }
 
-        const messagesEl = (this.elements && this.elements.messagesContainer)
-            || this.querySelector('.chatroom-messages');
+        const messagesEl = this.elements?.messagesContainer;
         if (messagesEl) {
             messagesEl.scrollTop = messagesEl.scrollHeight;
         }
     }
 
-    // Boardroom-specific features
+    // ── Boardroom-specific features ─────────────────────────────────────
+
     async startScreenShare() {
         this.showToast('Screen share initiated', 'info');
         this.dispatchEvent(new CustomEvent('boardroom-screen-share', { bubbles: true }));
