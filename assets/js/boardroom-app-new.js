@@ -3,13 +3,15 @@
  *
  * Thin extension of the generic ChatroomApp: adds business-specific
  * behavior (auth gate, agent loading, CopilotKit/AG-UI streaming, extra
- * header/toolbar buttons) on top of ChatroomApp's inherited rendering.
+ * header/toolbar buttons) on top of ChatroomApp's inherited hydration.
  *
- * BoardroomApp does NOT override _render() or reimplement message
- * rendering — all chat UI (header, messages, input) is rendered by the
- * inherited ChatroomApp._render() into the generic #chatArea, using the
- * chatroom__* message templates. BoardroomApp only adds to that layout via
- * the _onLayoutBuilt / _onInputBuilt extension hooks.
+ * BoardroomApp does not generate any structural markup. All chat UI
+ * (header, messages, input) is static HTML rendered by the theme's Liquid
+ * includes at build time; ChatroomApp hydrates it. BoardroomApp only adds
+ * to that already-static layout via the _onLayoutBuilt / _onInputBuilt
+ * hooks, which now receive the existing static elements (the component
+ * root and the static .chatroom-input element respectively) rather than
+ * freshly-built ones.
  *
  * The toggle strip and members sidebar shells are static HTML provided by
  * the chatroom layout (_includes/chatroom/toggle-strip.html and
@@ -37,8 +39,6 @@
  * wired up. Search for "TEMP" to find and revert each change.
  */
 
-// Import ChatroomApp from the remote theme
-// This path will be resolved by GitHub Pages through the remote_theme configuration
 import ChatroomApp from '/assets/js/chatroom-app.js';
 import { CopilotKitClient } from '/assets/js/copilotkit-client.js';
 
@@ -48,7 +48,6 @@ class BoardroomApp extends ChatroomApp {
     constructor() {
         super();
 
-        // Boardroom-specific configuration
         this.boardroomConfig = {
             showToggleStrip: this.hasAttribute('show-toggle-strip'),
             showMembersSidebar: this.hasAttribute('show-members-sidebar'),
@@ -62,7 +61,6 @@ class BoardroomApp extends ChatroomApp {
             copilotKitRuntimeUrl: this.getAttribute('copilotkit-runtime-url') || null,
         };
 
-        // Boardroom state
         this.agents = [];
         this.currentAgent = null;
         this.conversationId = null;
@@ -72,10 +70,6 @@ class BoardroomApp extends ChatroomApp {
         // sendMessage(); kept so it's easy to revert if needed.
         this.copilotKit = null;
 
-        // Auth state
-        // Wrapped in try/catch: some browsers' Tracking Prevention / storage
-        // partitioning can throw on localStorage access entirely, which would
-        // otherwise kill the whole module before customElements.define() runs.
         try {
             this.authToken = localStorage.getItem(AUTH_TOKEN_KEY) || null;
         } catch (err) {
@@ -86,17 +80,17 @@ class BoardroomApp extends ChatroomApp {
 
     // ── Auth: login gate ─────────────────────────────────────────────────
 
-    /**
-     * True once we have a token. Does not verify it's still valid server-side
-     * (a 401 from any request will trigger _showLoginGate() again).
-     */
     _isAuthenticated() {
         return !!this.authToken;
     }
 
     /**
      * Render a minimal password prompt over the chat area. Resolves once
-     * login succeeds and this.authToken is set.
+     * login succeeds and this.authToken is set. This overlay is genuinely
+     * dynamic/conditional UI (only shown when unauthenticated), so it
+     * remains JS-generated rather than static — unlike the chat shell,
+     * there is no meaningful "default" static version of a login form
+     * that should always be in the DOM.
      */
     _showLoginGate() {
         return new Promise((resolve) => {
@@ -155,10 +149,6 @@ class BoardroomApp extends ChatroomApp {
         });
     }
 
-    /**
-     * Wrapper around fetch() that attaches the auth token and, on a 401,
-     * re-runs the login gate once before retrying the request.
-     */
     async _authedFetch(url, options = {}) {
         const doFetch = () => fetch(url, {
             ...options,
@@ -180,13 +170,15 @@ class BoardroomApp extends ChatroomApp {
         return response;
     }
 
-    // ── Rendering hooks (called by inherited ChatroomApp._render()) ───────
+    // ── Hydration hooks (called by inherited ChatroomApp._hydrate()) ──────
 
     /**
-     * Extension hook from ChatroomApp._render(): add boardroom-specific
-     * toolbar buttons (formatting, file attach) to the cloned input bar
-     * before it's appended to the layout.
-     * @param {Element} inputEl  The cloned chatroom-input element.
+     * Extension hook from ChatroomApp._hydrate(): add boardroom-specific
+     * toolbar buttons (formatting, file attach) into the static input
+     * bar's existing toolbar slots. Does not generate the input bar
+     * itself — only adds buttons into its already-static
+     * .chatroom-input-toolbar-left / -right containers.
+     * @param {Element} inputEl  The static .chatroom-input element.
      */
     _onInputBuilt(inputEl) {
         super._onInputBuilt(inputEl);
@@ -199,23 +191,23 @@ class BoardroomApp extends ChatroomApp {
     }
 
     /**
-     * Extension hook from ChatroomApp._render(): add boardroom-specific
-     * header action buttons (Screen Share, Video Call, More Options)
-     * before the assembled layout is inserted into the DOM.
-     * @param {Element} layout  The assembled chatroom-layout element.
+     * Extension hook from ChatroomApp._hydrate(): add boardroom-specific
+     * header action buttons into the static header's existing
+     * .chatroom-actions container.
+     * @param {Element} rootEl  The component root (`this`).
      */
-    _onLayoutBuilt(layout) {
-        super._onLayoutBuilt(layout);
-        this._addBoardroomHeaderActions(layout);
+    _onLayoutBuilt(rootEl) {
+        super._onLayoutBuilt(rootEl);
+        this._addBoardroomHeaderActions(rootEl);
     }
 
     /**
      * Add boardroom-specific action buttons (Screen Share, Video Call, More Options)
-     * to the chatroom header's actions container.
-     * @param {Element} layout  Cloned chatroom-layout element
+     * into the static header's .chatroom-actions container.
+     * @param {Element} rootEl  Component root
      */
-    _addBoardroomHeaderActions(layout) {
-        const actionsEl = layout.querySelector('.chatroom-actions');
+    _addBoardroomHeaderActions(rootEl) {
+        const actionsEl = rootEl.querySelector('.chatroom-actions');
         if (!actionsEl) return;
 
         const cdnBase = 'https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/icons';
@@ -248,7 +240,6 @@ class BoardroomApp extends ChatroomApp {
             actionsEl.insertBefore(btn, actionsEl.firstChild);
         }
 
-        // Always show a More Options button at the end
         const moreBtn = document.createElement('button');
         moreBtn.className = 'chatroom-header-btn boardroom-action-btn';
         moreBtn.title = 'More Options';
@@ -263,9 +254,9 @@ class BoardroomApp extends ChatroomApp {
     }
 
     /**
-     * Add boardroom formatting buttons (Bold, Italic, Code) to the toolbar's
-     * left slot when `enable-formatting` is set.
-     * @param {Element} inputEl  Cloned chatroom-input element
+     * Add boardroom formatting buttons (Bold, Italic, Code) into the
+     * static toolbar's existing left slot.
+     * @param {Element} inputEl  Static .chatroom-input element
      */
     _addBoardroomToolbarButtons(inputEl) {
         const toolbarLeft = inputEl.querySelector('.chatroom-input-toolbar-left');
@@ -295,8 +286,8 @@ class BoardroomApp extends ChatroomApp {
     }
 
     /**
-     * Add a file-attach button to the toolbar's right slot.
-     * @param {Element} inputEl  Cloned chatroom-input element
+     * Add a file-attach button into the static toolbar's existing right slot.
+     * @param {Element} inputEl  Static .chatroom-input element
      */
     _addFileAttachButton(inputEl) {
         const toolbarRight = inputEl.querySelector('.chatroom-input-toolbar-right');
@@ -313,7 +304,6 @@ class BoardroomApp extends ChatroomApp {
         img.width = 18;
         img.height = 18;
         btn.appendChild(img);
-        // Insert before the send button
         const sendBtn = toolbarRight.querySelector('.chatroom-input-send-btn');
         if (sendBtn) {
             toolbarRight.insertBefore(btn, sendBtn);
@@ -325,11 +315,11 @@ class BoardroomApp extends ChatroomApp {
     // ── Lifecycle ────────────────────────────────────────────────────────
 
     async connectedCallback() {
-        // Call parent connectedCallback — this runs the inherited _render(),
-        // which calls our _onLayoutBuilt / _onInputBuilt hooks above.
+        // Runs the inherited hydration, which calls our _onLayoutBuilt /
+        // _onInputBuilt hooks above against the already-static shell.
         await super.connectedCallback();
 
-        // Hide the initial loading overlay now that the layout has rendered —
+        // Hide the initial loading overlay now that hydration has run —
         // it's no longer tied to a live connection at this stage. Without this,
         // the overlay stays visible indefinitely since hideLoading() otherwise
         // only fires after a successful agent selection.
@@ -340,10 +330,8 @@ class BoardroomApp extends ChatroomApp {
         //     await this._showLoginGate();
         // }
 
-        // Initialize boardroom-specific features
         await this.initializeBoardroom();
 
-        // Emit boardroom-ready event
         this.dispatchEvent(new CustomEvent('boardroom-ready', {
             bubbles: true,
             detail: { config: { ...this.config, ...this.boardroomConfig } }
@@ -351,7 +339,6 @@ class BoardroomApp extends ChatroomApp {
     }
 
     async initializeBoardroom() {
-        // Initialize the CopilotKit runtime client if a URL was provided
         this._initCopilotKit();
 
         // TEMP: agent loading disabled until backend is wired up
@@ -359,9 +346,6 @@ class BoardroomApp extends ChatroomApp {
         //     await this.loadAgents();
         // }
 
-        // Attach boardroom-specific event handlers (screen share, video
-        // call, file attach — NOT toggle-strip/sidebar behavior, which is
-        // owned entirely by chatroom-panels.js)
         this.attachBoardroomEventHandlers();
     }
 
@@ -393,12 +377,12 @@ class BoardroomApp extends ChatroomApp {
     }
 
     initializeElements() {
-        // Call parent initializeElements — sets up this.elements against
-        // the inherited chatroom-* selectors (title, messagesContainer,
-        // inputField, etc.)
+        // Sets up this.elements against the inherited chatroom-* selectors
+        // (title, messagesContainer, inputField, etc.), all of which now
+        // target the static shell rather than JS-cloned markup.
         super.initializeElements();
 
-        // Get boardroom-specific elements. Note: toggle strip and members
+        // Boardroom-specific elements. Note: toggle strip and members
         // sidebar are the shared generic panels from the chatroom layout
         // (see _includes/chatroom/toggle-strip.html and
         // members-sidebar.html) — their IDs are chatroom-prefixed, not
@@ -468,6 +452,9 @@ class BoardroomApp extends ChatroomApp {
      *   class="chatroom-members-sidebar__item"
      *   data-status="online|away|offline"
      *   data-name="<lowercase name, for search matching>"
+     * This content is genuinely dynamic (agent roster fetched from the
+     * server), so it remains JS-generated — the mount point itself
+     * (#chatroomMembersList) is static, shipped by members-sidebar.html.
      * chatroom-panels.js observes this list via MutationObserver and
      * re-applies the current filter automatically after this runs.
      */
@@ -532,18 +519,16 @@ class BoardroomApp extends ChatroomApp {
 
             this.currentAgent = this.agents.find(a => a.agentId === agentId);
 
-            // Load agent profile
             const profileResponse = await this._authedFetch(`${this.boardroomConfig.apiBase}/agents/${agentId}`);
             if (profileResponse.ok) {
                 const profile = await profileResponse.json();
                 this.renderAgentProfile(profile);
             }
 
-            // Start a fresh conversation "thread" for the new agent.
-            // conversationId is just tracked client-side now; the backend
-            // /chat route is stateless per-request.
+            // conversationId is tracked client-side; the backend /chat
+            // route is stateless per-request.
             this.conversationId = `${agentId}-${Date.now()}`;
-            this._clearMessages();
+            this.clearMessages();
             this.updateTitle(this.currentAgent?.name ?? agentId);
 
             this.hideLoading();
@@ -584,20 +569,6 @@ class BoardroomApp extends ChatroomApp {
     `;
     }
 
-    /**
-     * Clear the message list. Delegates to the inherited ChatroomApp
-     * message container rather than a boardroom-specific one.
-     */
-    _clearMessages() {
-        const messagesEl = this.elements?.messagesContainer;
-        if (!messagesEl) return;
-        messagesEl.replaceChildren();
-        const emptyState = document.createElement('div');
-        emptyState.className = 'chatroom-empty-state';
-        emptyState.textContent = 'No messages yet. Start the conversation!';
-        messagesEl.appendChild(emptyState);
-    }
-
     // ── Sending messages ─────────────────────────────────────────────────
 
     /**
@@ -607,7 +578,8 @@ class BoardroomApp extends ChatroomApp {
      * the inherited ChatroomApp.sendMessage(), which already handles
      * slash-commands/MCP apps and posting to config.apiEndpoint (or a
      * local echo when no apiEndpoint is set) using the inherited
-     * chatroom__* message rendering.
+     * chatroom__* message rendering into the static .chatroom-messages
+     * container.
      *
      * TEMP (standalone chat UI testing): CopilotKit and the backend fallback
      * are both bypassed below in favor of a local echo, since neither is
@@ -615,11 +587,9 @@ class BoardroomApp extends ChatroomApp {
      * orchestration is ready.
      */
     async sendMessage() {
-        // TEMP: no backend/agent wired up yet — local echo only, using the
-        // inherited chatroom__* message rendering via _buildDomainUserMsg /
-        // _buildOwnMsg (through the parent's own _appendUserMessage-equivalent
-        // path). We call super.sendMessage() directly since ChatroomApp
-        // already falls back to a local echo when config.apiEndpoint is unset.
+        // TEMP: no backend/agent wired up yet — local echo only, via the
+        // inherited super.sendMessage(), which already falls back to a
+        // local echo when config.apiEndpoint is unset.
         await super.sendMessage();
         return;
 
@@ -655,9 +625,6 @@ class BoardroomApp extends ChatroomApp {
         const emptyState = messagesEl?.querySelector('.chatroom-empty-state');
         if (emptyState) emptyState.hidden = true;
 
-        // Use the inherited domain/own-message builder so streamed
-        // conversations render with the same chatroom__* markup as
-        // everything else.
         const el = this._buildDomainUserMsg(text) ?? this._buildOwnMsg({
             text,
             time: this._formatNow(),
@@ -685,14 +652,10 @@ class BoardroomApp extends ChatroomApp {
     // ── CopilotKit streaming message helpers ────────────────────────────
     // These build/update chatroom__* message elements (the same templates
     // ChatroomApp itself uses) so streamed CopilotKit responses look
-    // identical to non-streamed agent messages. They do not introduce a
-    // second message vocabulary.
+    // identical to non-streamed agent messages. Streamed message content is
+    // genuinely dynamic, so it stays JS-generated — same as every other
+    // message in the conversation.
 
-    /**
-     * Create a new AI streaming bubble when the CopilotKit runtime starts a message.
-     * @param {string} messageId - Unique ID from the runtime SSE stream
-     * @param {string} [agentName] - Display name of the responding agent
-     */
     _createStreamingBubble(messageId, agentName) {
         const messagesEl = this.elements?.messagesContainer;
         if (!messagesEl) return;
@@ -738,11 +701,6 @@ class BoardroomApp extends ChatroomApp {
         messagesEl.scrollTop = messagesEl.scrollHeight;
     }
 
-    /**
-     * Append a streaming text chunk to the active AI bubble.
-     * @param {string} chunk - New token(s) to append
-     * @param {string} messageId - ID matching the bubble created by _createStreamingBubble
-     */
     _appendStreamChunk(chunk, messageId) {
         const textEl = this.querySelector(`#copilotkit-bubble-${messageId}`);
         if (!textEl) return;
@@ -755,11 +713,6 @@ class BoardroomApp extends ChatroomApp {
         }
     }
 
-    /**
-     * Finalize a streaming AI bubble once the message is complete.
-     * @param {string} messageId
-     * @param {string} fullContent - Complete response text
-     */
     _finalizeStreamingBubble(messageId, fullContent) {
         const textEl = this.querySelector(`#copilotkit-bubble-${messageId}`);
         if (textEl && textEl.textContent.trim() !== fullContent.trim()) {
@@ -828,9 +781,6 @@ class BoardroomApp extends ChatroomApp {
     hideLoading() {
         if (!this.boardroomElements.loadingOverlay) return;
         this.boardroomElements.loadingOverlay.classList.remove('active');
-        // Belt-and-suspenders: some deployments' CSS shows this overlay by
-        // default (display:flex) with no rule that hides it in the absence
-        // of .active, so force it closed directly too.
         this.boardroomElements.loadingOverlay.style.display = 'none';
     }
 
@@ -869,7 +819,6 @@ class BoardroomApp extends ChatroomApp {
     }
 }
 
-// Register the custom element if not already defined to avoid duplicate-define errors
 if (!customElements.get('boardroom-app')) {
     customElements.define('boardroom-app', BoardroomApp);
 }
