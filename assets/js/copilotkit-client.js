@@ -33,7 +33,17 @@ export class CopilotKitClient {
     this.messages = [];
     this.abortController = null;
 
+    // Shared agent state (AG-UI STATE_SNAPSHOT / STATE_DELTA), round-tripped
+    // to the backend in each RunAgentInput.state.
+    this.state = options.state || {};
+    this._toolCalls = {};
+    this._runFinishedFired = false;
+
     // Callbacks
+    this.onRunStarted = null;    // (runId, threadId) => void
+    this.onStateChange = null;   // (state) => void
+    this.onToolCall = null;      // ({id, name, args, status, result}) => void
+    this.onMessagesSnapshot = null; // (messages) => void
     this.onStreamChunk = null;   // (chunk, messageId) => void
     this.onMessageStart = null;  // (messageId, agentName?) => void
     this.onMessageEnd = null;    // (messageId, fullContent) => void
@@ -59,6 +69,21 @@ export class CopilotKitClient {
   resetThread() {
     this.threadId = CopilotKitClient.randomUUID();
     this.messages = [];
+    this.state = {};
+    this._toolCalls = {};
+  }
+
+  /** Continue an existing thread (e.g. the boardroom conversation id) */
+  setThread(threadId) {
+    this.threadId = threadId || CopilotKitClient.randomUUID();
+    this.messages = [];
+    this.state = {};
+    this._toolCalls = {};
+  }
+
+  /** Merge boardroom-level state that is sent with every run */
+  setState(patch) {
+    this.state = { ...this.state, ...patch };
   }
 
   /** Set (or clear) the active agent for subsequent messages */
@@ -102,12 +127,13 @@ export class CopilotKitClient {
       this.abortController.abort();
     }
     this.abortController = new AbortController();
+    this._runFinishedFired = false;
 
     const requestBody = {
       threadId: this.threadId,
       runId: CopilotKitClient.randomUUID(),
       messages: this.messages,
-      state: {},
+      state: { ...this.state, ...options.state },
       // AG-UI RunAgentInput requires `tools`, `context` (each {description, value})
       // and `forwardedProps`; omitting them yields a 422 from the backend.
       tools: options.tools || [],
@@ -195,7 +221,7 @@ export class CopilotKitClient {
         buffer += decoder.decode(value, { stream: true });
 
         // Split on newlines; keep incomplete last chunk
-        const lines = buffer.split('\n');
+        const lines = buffer.split(/\r?\n/);
         buffer = lines.pop() ?? '';
 
         for (const line of lines) {
@@ -219,10 +245,44 @@ export class CopilotKitClient {
       reader.releaseLock();
     }
 
-    if (this.onRunFinished) {
-      this.onRunFinished(fullContent);
-    }
+    this._fireRunFinished(fullContent);
     return fullContent;
+  }
+
+  _fireRunFinished(content) {
+    if (this._runFinishedFired) return;
+    this._runFinishedFired = true;
+    if (this.onRunFinished) this.onRunFinished(content);
+  }
+
+  _emitToolCall(id) {
+    if (this.onToolCall && this._toolCalls[id]) {
+      this.onToolCall({ ...this._toolCalls[id] });
+    }
+  }
+
+  /** Apply an RFC 6902 JSON Patch (add/replace/remove) to this.state */
+  _applyStateDelta(ops) {
+    const next = JSON.parse(JSON.stringify(this.state || {}));
+    for (const op of Array.isArray(ops) ? ops : []) {
+      const path = String(op.path || '').split('/').slice(1)
+        .map((k) => k.replace(/~1/g, '/').replace(/~0/g, '~'));
+      if (!path.length || path.some((k) => k === '__proto__' || k === 'constructor' || k === 'prototype')) continue;
+      let target = next;
+      for (let i = 0; i < path.length - 1 && target != null; i++) target = target[path[i]];
+      if (target == null || typeof target !== 'object') continue;
+      const key = path[path.length - 1];
+      const isArr = Array.isArray(target);
+      const idx = isArr ? (key === '-' ? target.length : Number(key)) : key;
+      if (op.op === 'add') {
+        if (isArr) target.splice(idx, 0, op.value); else target[idx] = op.value;
+      } else if (op.op === 'replace') {
+        target[idx] = op.value;
+      } else if (op.op === 'remove') {
+        if (isArr) target.splice(idx, 1); else delete target[idx];
+      }
+    }
+    return next;
   }
 
   /**
@@ -252,6 +312,11 @@ export class CopilotKitClient {
       case 'TextMessageContent': {
         // AG-UI uses `delta`; legacy CopilotKit used `content`
         const chunk = event.delta ?? event.content ?? '';
+        if (!(event.messageId in messageBuffer)) {
+          // Content without a START event – open the message implicitly
+          messageBuffer[event.messageId] = '';
+          if (this.onMessageStart) this.onMessageStart(event.messageId, event.agentName);
+        }
         messageBuffer[event.messageId] = (messageBuffer[event.messageId] ?? '') + chunk;
         if (this.onStreamChunk) {
           this.onStreamChunk(chunk, event.messageId);
@@ -273,14 +338,12 @@ export class CopilotKitClient {
       // ── Run lifecycle ──
       case 'RUN_STARTED':
       case 'RunStarted':
+        if (this.onRunStarted) this.onRunStarted(event.runId, event.threadId);
         return null;
 
       case 'RUN_FINISHED':
       case 'RunFinished': {
-        const combined = Object.values(messageBuffer).join('');
-        if (this.onRunFinished) {
-          this.onRunFinished(combined);
-        }
+        this._fireRunFinished(Object.values(messageBuffer).join(''));
         return null;
       }
 
@@ -298,21 +361,58 @@ export class CopilotKitClient {
       case 'AgentStateMessage':
         return null;
 
-      // ── Tool calls (no text output on the client side) ──
+      // ── Tool calls (no text output; surfaced via onToolCall) ──
       case 'TOOL_CALL_START':
-      case 'ActionExecutionStart':
-      case 'TOOL_CALL_ARGS':
-      case 'ActionExecutionArgs':
-      case 'TOOL_CALL_END':
-      case 'ActionExecutionEnd':
-      case 'TOOL_CALL_RESULT':
-      case 'ActionExecutionResult':
+      case 'ActionExecutionStart': {
+        const id = event.toolCallId ?? event.actionExecutionId;
+        this._toolCalls[id] = {
+          id,
+          name: event.toolCallName ?? event.name ?? '',
+          args: '',
+          status: 'running',
+          result: null,
+        };
+        this._emitToolCall(id);
         return null;
+      }
+      case 'TOOL_CALL_ARGS':
+      case 'ActionExecutionArgs': {
+        const id = event.toolCallId ?? event.actionExecutionId;
+        if (this._toolCalls[id]) this._toolCalls[id].args += event.delta ?? event.args ?? '';
+        return null;
+      }
+      case 'TOOL_CALL_END':
+      case 'ActionExecutionEnd': {
+        const id = event.toolCallId ?? event.actionExecutionId;
+        if (this._toolCalls[id]) {
+          this._toolCalls[id].status = 'done';
+          this._emitToolCall(id);
+        }
+        return null;
+      }
+      case 'TOOL_CALL_RESULT':
+      case 'ActionExecutionResult': {
+        const id = event.toolCallId ?? event.actionExecutionId;
+        if (this._toolCalls[id]) {
+          this._toolCalls[id].result = event.content ?? event.result ?? null;
+          this._toolCalls[id].status = 'complete';
+          this._emitToolCall(id);
+        }
+        return null;
+      }
 
       // ── State updates ──
       case 'STATE_SNAPSHOT':
+        this.state = event.snapshot ?? {};
+        if (this.onStateChange) this.onStateChange(this.state);
+        return null;
       case 'STATE_DELTA':
+        this.state = this._applyStateDelta(event.delta);
+        if (this.onStateChange) this.onStateChange(this.state);
+        return null;
       case 'MESSAGES_SNAPSHOT':
+        if (this.onMessagesSnapshot) this.onMessagesSnapshot(event.messages ?? []);
+        return null;
       case 'STEP_STARTED':
       case 'STEP_FINISHED':
         return null;

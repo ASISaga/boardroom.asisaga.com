@@ -485,7 +485,52 @@ class BoardroomApp extends ChatroomApp {
             console.error('[CopilotKit] Error:', error);
             this.showToast('AI response error – please try again', 'error');
             this.hideLoading();
+            this._setRunning(false);
         };
+        this.copilotKit.onRunStarted = () => this._setRunning(true);
+        this.copilotKit.onRunFinished = () => this._setRunning(false);
+        this.copilotKit.onStateChange = (state) => {
+            this.dispatchEvent(new CustomEvent('boardroom-agent-state', {
+                bubbles: true,
+                detail: { state, agent: this.currentAgent, conversationId: this.conversationId },
+            }));
+        };
+        this.copilotKit.onToolCall = (call) => {
+            if (call.status === 'running') {
+                this.showToast(`${this.currentAgent?.name || 'Agent'}: ${call.name || 'working'}…`, 'info');
+            }
+            this.dispatchEvent(new CustomEvent('boardroom-tool-call', {
+                bubbles: true,
+                detail: { call, agent: this.currentAgent, conversationId: this.conversationId },
+            }));
+        };
+        this._syncCopilotKitAgent();
+    }
+
+    /** Disable/enable the input while an AG-UI run is streaming. */
+    _setRunning(running) {
+        this.classList.toggle('boardroom-app--running', running);
+        const input = this.elements?.inputField;
+        if (input) input.setAttribute('aria-busy', String(running));
+    }
+
+    /**
+     * Bind the AG-UI thread/agent/state to the selected boardroom agent so
+     * the backend routes to the right executive and keeps per-agent context.
+     */
+    _syncCopilotKitAgent() {
+        if (!this.copilotKit) return;
+        const agent = this.currentAgent;
+        this.copilotKit.setThread(this.conversationId);
+        this.copilotKit.setAgent(agent ? (agent.agentId) : null);
+        this.copilotKit.setState({
+            boardroom: agent ? {
+                agentId: agent.agentId,
+                agentName: agent.name,
+                role: agent.role || null,
+                conversationId: this.conversationId,
+            } : {},
+        });
     }
 
     initializeElements() {
@@ -641,6 +686,7 @@ class BoardroomApp extends ChatroomApp {
             // route is stateless per-request.
             this.conversationId = `${agentId}-${Date.now()}`;
             this.clearMessages();
+            this._syncCopilotKitAgent();
             this.updateTitle(this.currentAgent?.name ?? agentId);
 
             this.hideLoading();
@@ -736,6 +782,11 @@ class BoardroomApp extends ChatroomApp {
 
         try {
             await this.copilotKit.sendMessage(text, {
+                forwardedProps: this.currentAgent ? {
+                    agentId: this.currentAgent.agentId,
+                    role: this.currentAgent.role || null,
+                    conversationId: this.conversationId,
+                } : {},
                 context: this.currentAgent
                     ? [{
                         description: 'Active boardroom agent',
