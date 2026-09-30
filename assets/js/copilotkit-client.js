@@ -24,7 +24,7 @@ export class CopilotKitClient {
    *   particular auth mechanism. If omitted, no Authorization header is sent.
    */
   constructor(options = {}) {
-    this.runtimeUrl = options.runtimeUrl || '/api/copilotkit';
+    this.runtimeUrl = options.runtimeUrl || '/ag-ui';
     this.threadId = options.threadId || CopilotKitClient.randomUUID();
     this.agentName = options.agentName || null;
     this.extraHeaders = options.headers || {};
@@ -33,7 +33,22 @@ export class CopilotKitClient {
     this.messages = [];
     this.abortController = null;
 
+    // Shared agent state (AG-UI STATE_SNAPSHOT / STATE_DELTA), round-tripped
+    // to the backend in each RunAgentInput.state.
+    this.state = options.state || {};
+    this._toolCalls = {};
+    this._runFinishedFired = false;
+    this._currentStep = null;    // active speaker (STEP_STARTED.stepName)
+
     // Callbacks
+    this.onStepStarted = null;   // (speaker) => void
+    this.onStepFinished = null;  // (speaker) => void
+    this.onCustomEvent = null;   // (name, value) => void
+    this.onRunResult = null;     // (result) => void  (RUN_FINISHED.result / digest)
+    this.onRunStarted = null;    // (runId, threadId) => void
+    this.onStateChange = null;   // (state) => void
+    this.onToolCall = null;      // ({id, name, args, status, result}) => void
+    this.onMessagesSnapshot = null; // (messages) => void
     this.onStreamChunk = null;   // (chunk, messageId) => void
     this.onMessageStart = null;  // (messageId, agentName?) => void
     this.onMessageEnd = null;    // (messageId, fullContent) => void
@@ -59,6 +74,21 @@ export class CopilotKitClient {
   resetThread() {
     this.threadId = CopilotKitClient.randomUUID();
     this.messages = [];
+    this.state = {};
+    this._toolCalls = {};
+  }
+
+  /** Continue an existing thread (e.g. the boardroom conversation id) */
+  setThread(threadId) {
+    this.threadId = threadId || CopilotKitClient.randomUUID();
+    this.messages = [];
+    this.state = {};
+    this._toolCalls = {};
+  }
+
+  /** Merge boardroom-level state that is sent with every run */
+  setState(patch) {
+    this.state = { ...this.state, ...patch };
   }
 
   /** Set (or clear) the active agent for subsequent messages */
@@ -102,21 +132,28 @@ export class CopilotKitClient {
       this.abortController.abort();
     }
     this.abortController = new AbortController();
+    this._runFinishedFired = false;
 
     const requestBody = {
       threadId: this.threadId,
       runId: CopilotKitClient.randomUUID(),
-      messages: this.messages,
-      state: {},
-      context: options.context || [],
-    };
-
-    if (this.agentName) {
-      requestBody.forwardedProps = {
-        agentName: this.agentName,
+      // The backend relays only the latest user utterance to the boardroom
+      // (it discards assistant/tool history and rejects tool calls), and
+      // durable history lives server-side in mind. Send just the new turn.
+      messages: [this.messages[this.messages.length - 1]],
+      state: { ...this.state, ...options.state },
+      // AG-UI RunAgentInput requires `tools`, `context` (each {description, value})
+      // and `forwardedProps`; omitting them yields a 422 from the backend.
+      tools: options.tools || [],
+      context: (options.context || []).map((c) => ({
+        description: c.description ?? '',
+        value: typeof c.value === 'string' ? c.value : JSON.stringify(c.value ?? c.description ?? ''),
+      })),
+      forwardedProps: {
+        ...(this.agentName ? { agentName: this.agentName } : {}),
         ...options.forwardedProps,
-      };
-    }
+      },
+    };
 
     const headers = {
       'Content-Type': 'application/json',
@@ -148,7 +185,9 @@ export class CopilotKitClient {
 
       if (!response.ok) {
         const errText = await response.text().catch(() => response.statusText);
-        throw new Error(`CopilotKit runtime error ${response.status}: ${errText}`);
+        const err = new Error(`Boardroom error ${response.status}: ${errText}`);
+        err.status = response.status;
+        throw err;
       }
 
       const fullContent = await this._processSSEStream(response);
@@ -166,6 +205,50 @@ export class CopilotKitClient {
       }
       throw error;
     }
+  }
+
+  /**
+   * Hydrate the thread from the backend (known threadId, empty messages,
+   * no O invocation). The server answers from mind with the last turns as
+   * a MESSAGES_SNAPSHOT and a STATE_SNAPSHOT.
+   *
+   * @returns {Promise<void>}
+   */
+  async hydrate(options = {}) {
+    if (this.abortController) this.abortController.abort();
+    this.abortController = new AbortController();
+    this._runFinishedFired = false;
+
+    const headers = {
+      'Content-Type': 'application/json',
+      'Accept': 'text/event-stream',
+      ...this.extraHeaders,
+    };
+    if (this.getAccessToken) {
+      const token = await this.getAccessToken();
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+    }
+
+    const response = await fetch(this.runtimeUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        threadId: this.threadId,
+        runId: CopilotKitClient.randomUUID(),
+        messages: [],
+        state: {},
+        tools: [],
+        context: [],
+        forwardedProps: options.forwardedProps || {},
+      }),
+      signal: this.abortController.signal,
+    });
+    if (!response.ok) {
+      const err = new Error(`Boardroom hydrate error ${response.status}`);
+      err.status = response.status;
+      throw err;
+    }
+    await this._processSSEStream(response);
   }
 
   /** Abort any in-progress stream */
@@ -192,7 +275,7 @@ export class CopilotKitClient {
         buffer += decoder.decode(value, { stream: true });
 
         // Split on newlines; keep incomplete last chunk
-        const lines = buffer.split('\n');
+        const lines = buffer.split(/\r?\n/);
         buffer = lines.pop() ?? '';
 
         for (const line of lines) {
@@ -216,10 +299,44 @@ export class CopilotKitClient {
       reader.releaseLock();
     }
 
-    if (this.onRunFinished) {
-      this.onRunFinished(fullContent);
-    }
+    this._fireRunFinished(fullContent);
     return fullContent;
+  }
+
+  _fireRunFinished(content) {
+    if (this._runFinishedFired) return;
+    this._runFinishedFired = true;
+    if (this.onRunFinished) this.onRunFinished(content);
+  }
+
+  _emitToolCall(id) {
+    if (this.onToolCall && this._toolCalls[id]) {
+      this.onToolCall({ ...this._toolCalls[id] });
+    }
+  }
+
+  /** Apply an RFC 6902 JSON Patch (add/replace/remove) to this.state */
+  _applyStateDelta(ops) {
+    const next = JSON.parse(JSON.stringify(this.state || {}));
+    for (const op of Array.isArray(ops) ? ops : []) {
+      const path = String(op.path || '').split('/').slice(1)
+        .map((k) => k.replace(/~1/g, '/').replace(/~0/g, '~'));
+      if (!path.length || path.some((k) => k === '__proto__' || k === 'constructor' || k === 'prototype')) continue;
+      let target = next;
+      for (let i = 0; i < path.length - 1 && target != null; i++) target = target[path[i]];
+      if (target == null || typeof target !== 'object') continue;
+      const key = path[path.length - 1];
+      const isArr = Array.isArray(target);
+      const idx = isArr ? (key === '-' ? target.length : Number(key)) : key;
+      if (op.op === 'add') {
+        if (isArr) target.splice(idx, 0, op.value); else target[idx] = op.value;
+      } else if (op.op === 'replace') {
+        target[idx] = op.value;
+      } else if (op.op === 'remove') {
+        if (isArr) target.splice(idx, 1); else delete target[idx];
+      }
+    }
+    return next;
   }
 
   /**
@@ -239,7 +356,7 @@ export class CopilotKitClient {
       case 'TextMessageStart': {
         messageBuffer[event.messageId] = '';
         if (this.onMessageStart) {
-          this.onMessageStart(event.messageId, event.agentName);
+          this.onMessageStart(event.messageId, event.agentName ?? this._currentStep);
         }
         return null;
       }
@@ -249,6 +366,11 @@ export class CopilotKitClient {
       case 'TextMessageContent': {
         // AG-UI uses `delta`; legacy CopilotKit used `content`
         const chunk = event.delta ?? event.content ?? '';
+        if (!(event.messageId in messageBuffer)) {
+          // Content without a START event – open the message implicitly
+          messageBuffer[event.messageId] = '';
+          if (this.onMessageStart) this.onMessageStart(event.messageId, event.agentName ?? this._currentStep);
+        }
         messageBuffer[event.messageId] = (messageBuffer[event.messageId] ?? '') + chunk;
         if (this.onStreamChunk) {
           this.onStreamChunk(chunk, event.messageId);
@@ -270,20 +392,21 @@ export class CopilotKitClient {
       // ── Run lifecycle ──
       case 'RUN_STARTED':
       case 'RunStarted':
+        if (this.onRunStarted) this.onRunStarted(event.runId, event.threadId);
         return null;
 
       case 'RUN_FINISHED':
       case 'RunFinished': {
-        const combined = Object.values(messageBuffer).join('');
-        if (this.onRunFinished) {
-          this.onRunFinished(combined);
-        }
+        if (this.onRunResult) this.onRunResult(event.result ?? null);
+        this._currentStep = null;
+        this._fireRunFinished(Object.values(messageBuffer).join(''));
         return null;
       }
 
       case 'RUN_ERROR':
       case 'RunError': {
         const err = new Error(event.message ?? 'CopilotKit run error');
+        err.code = event.code;
         if (this.onError) {
           this.onError(err);
         }
@@ -295,23 +418,69 @@ export class CopilotKitClient {
       case 'AgentStateMessage':
         return null;
 
-      // ── Tool calls (no text output on the client side) ──
+      // ── Tool calls (no text output; surfaced via onToolCall) ──
       case 'TOOL_CALL_START':
-      case 'ActionExecutionStart':
-      case 'TOOL_CALL_ARGS':
-      case 'ActionExecutionArgs':
-      case 'TOOL_CALL_END':
-      case 'ActionExecutionEnd':
-      case 'TOOL_CALL_RESULT':
-      case 'ActionExecutionResult':
+      case 'ActionExecutionStart': {
+        const id = event.toolCallId ?? event.actionExecutionId;
+        this._toolCalls[id] = {
+          id,
+          name: event.toolCallName ?? event.name ?? '',
+          args: '',
+          status: 'running',
+          result: null,
+        };
+        this._emitToolCall(id);
         return null;
+      }
+      case 'TOOL_CALL_ARGS':
+      case 'ActionExecutionArgs': {
+        const id = event.toolCallId ?? event.actionExecutionId;
+        if (this._toolCalls[id]) this._toolCalls[id].args += event.delta ?? event.args ?? '';
+        return null;
+      }
+      case 'TOOL_CALL_END':
+      case 'ActionExecutionEnd': {
+        const id = event.toolCallId ?? event.actionExecutionId;
+        if (this._toolCalls[id]) {
+          this._toolCalls[id].status = 'done';
+          this._emitToolCall(id);
+        }
+        return null;
+      }
+      case 'TOOL_CALL_RESULT':
+      case 'ActionExecutionResult': {
+        const id = event.toolCallId ?? event.actionExecutionId;
+        if (this._toolCalls[id]) {
+          this._toolCalls[id].result = event.content ?? event.result ?? null;
+          this._toolCalls[id].status = 'complete';
+          this._emitToolCall(id);
+        }
+        return null;
+      }
 
       // ── State updates ──
       case 'STATE_SNAPSHOT':
+        this.state = event.snapshot ?? {};
+        if (this.onStateChange) this.onStateChange(this.state);
+        return null;
       case 'STATE_DELTA':
+        this.state = this._applyStateDelta(event.delta);
+        if (this.onStateChange) this.onStateChange(this.state);
+        return null;
       case 'MESSAGES_SNAPSHOT':
+        this.messages = (event.messages ?? []).slice(-this.maxHistory);
+        if (this.onMessagesSnapshot) this.onMessagesSnapshot(event.messages ?? []);
+        return null;
       case 'STEP_STARTED':
+        this._currentStep = event.stepName ?? null;
+        if (this.onStepStarted) this.onStepStarted(this._currentStep);
+        return null;
       case 'STEP_FINISHED':
+        if (this.onStepFinished) this.onStepFinished(event.stepName ?? null);
+        if (this._currentStep === event.stepName) this._currentStep = null;
+        return null;
+      case 'CUSTOM':
+        if (this.onCustomEvent) this.onCustomEvent(event.name, event.value);
         return null;
 
       default:

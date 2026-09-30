@@ -88,6 +88,24 @@ const MSAL_API_SCOPES = ['api://09ee9579-46c7-4163-949c-f5f90067a70c/access_as_u
 // visual state after). Cleared once restored.
 const DRAFT_STORAGE_KEY = 'boardroom_draft_message';
 
+// The backend (ASISaga/boardroom, POST /ag-ui) runs ONE perpetual boardroom
+// per company; the Founder and C-suite speak as AG-UI steps
+// (STEP_STARTED.stepName). It exposes no roster REST endpoint, so the members
+// sidebar is seeded from the known board and driven by step events.
+const BOARDROOM_ROSTER = [
+    { agentId: 'founder', name: 'Founder', role: 'Founder' },
+    { agentId: 'ceo', name: 'CEO', role: 'Chief Executive Officer' },
+    { agentId: 'cfo', name: 'CFO', role: 'Chief Financial Officer' },
+    { agentId: 'coo', name: 'COO', role: 'Chief Operating Officer' },
+    { agentId: 'cmo', name: 'CMO', role: 'Chief Marketing Officer' },
+    { agentId: 'cto', name: 'CTO', role: 'Chief Technology Officer' },
+    { agentId: 'cso', name: 'CSO', role: 'Chief Strategy Officer' },
+    { agentId: 'chro', name: 'CHRO', role: 'Chief HR Officer' },
+];
+
+// Backend sanitize.MAX_USER_TEXT_CHARS
+const MAX_USER_TEXT_CHARS = 8000;
+
 class BoardroomApp extends ChatroomApp {
     constructor() {
         super();
@@ -453,6 +471,14 @@ class BoardroomApp extends ChatroomApp {
         }
 
         this.attachBoardroomEventHandlers();
+
+        if (this.copilotKit) {
+            await this._hydrateBoardroom();
+            this._onVisibility = () => {
+                if (document.visibilityState === 'visible') this._hydrateBoardroom();
+            };
+            document.addEventListener('visibilitychange', this._onVisibility);
+        }
     }
 
     /**
@@ -475,17 +501,176 @@ class BoardroomApp extends ChatroomApp {
         this.copilotKit.onStreamChunk = (chunk, messageId) => {
             this._appendStreamChunk(chunk, messageId);
         };
-        this.copilotKit.onMessageStart = (messageId, agentName) => {
-            this._createStreamingBubble(messageId, agentName || this.currentAgent?.name);
+        this.copilotKit.onMessageStart = (messageId, speaker) => {
+            this._createStreamingBubble(messageId, speaker);
         };
         this.copilotKit.onMessageEnd = (messageId, fullContent) => {
             this._finalizeStreamingBubble(messageId, fullContent);
         };
-        this.copilotKit.onError = (error) => {
-            console.error('[CopilotKit] Error:', error);
-            this.showToast('AI response error – please try again', 'error');
-            this.hideLoading();
+        this.copilotKit.onError = (error) => this._handleRunError(error);
+        this.copilotKit.onRunStarted = () => this._setRunning(true);
+        this.copilotKit.onRunFinished = () => {
+            this._setRunning(false);
+            this._setActiveSpeaker(null);
         };
+        this.copilotKit.onRunResult = (result) => {
+            if (result && result.cancelled) {
+                this.showToast('The boardroom turn was cancelled', 'info');
+            }
+            this.dispatchEvent(new CustomEvent('boardroom-turn-complete', {
+                bubbles: true,
+                detail: { result, conversationId: this.conversationId },
+            }));
+        };
+        this.copilotKit.onStepStarted = (speaker) => this._setActiveSpeaker(speaker);
+        this.copilotKit.onStepFinished = () => this._setActiveSpeaker(null);
+        this.copilotKit.onCustomEvent = (name, value) => this._handleBoardroomEvent(name, value);
+        this.copilotKit.onStateChange = (state) => {
+            const away = Number(state?.since_you_were_away || 0);
+            if (away > 0 && this._hydrating) {
+                this.showToast(`${away} boardroom decision${away === 1 ? '' : 's'} while you were away`, 'info');
+            }
+            this.dispatchEvent(new CustomEvent('boardroom-agent-state', {
+                bubbles: true,
+                detail: { state, conversationId: this.conversationId },
+            }));
+        };
+        this.copilotKit.onMessagesSnapshot = (messages) => this._renderSnapshot(messages);
+        this._syncCopilotKitThread();
+    }
+
+    /**
+     * The boardroom is one company-wide room: a single thread
+     * (`boardroom:{company_id}`), not one per selected agent. Tenant scope is
+     * always derived server-side from the token; this id only keys the
+     * AG-UI thread.
+     */
+    _syncCopilotKitThread() {
+        if (!this.copilotKit) return;
+        const claims = this.msalAccount?.idTokenClaims || {};
+        const companyId = claims.company_id || claims.extension_company_id || 'default';
+        this.conversationId = `boardroom:${companyId}`;
+        this.copilotKit.setThread(this.conversationId);
+    }
+
+    _speakerInfo(name) {
+        const key = String(name || '').toLowerCase();
+        return this.agents.find((a) => a.agentId === key || (a.name || '').toLowerCase() === key) || null;
+    }
+
+    /** Disable/enable the input while an AG-UI run is streaming. */
+    _setRunning(running) {
+        this._running = running;
+        this.classList.toggle('boardroom-app--running', running);
+        const input = this.elements?.inputField;
+        if (input) input.setAttribute('aria-busy', String(running));
+    }
+
+    /** Mark the deliberating C-suite member in the members sidebar. */
+    _setActiveSpeaker(speaker) {
+        const list = this.boardroomElements?.membersList;
+        if (!list) return;
+        const key = String(speaker || '').toLowerCase();
+        list.querySelectorAll('.chatroom-members-sidebar__item').forEach((item) => {
+            const active = !!key && (item.dataset.agentId === key || item.dataset.name === key);
+            item.classList.toggle('chatroom-members-sidebar__item--speaking', active);
+            if (active) item.setAttribute('aria-current', 'true');
+            else item.removeAttribute('aria-current');
+        });
+    }
+
+    _handleRunError(error) {
+        console.error('[Boardroom] AG-UI error:', error);
+        this._setRunning(false);
+        this._setActiveSpeaker(null);
+        this.hideLoading();
+        if (error?.status === 401 || error?.status === 403) {
+            // Token missing/expired, or lacking the `participant` App Role.
+            if (error.status === 401) {
+                this.msalAccount = null;
+                this._redirectToLogin();
+                return;
+            }
+            this.showToast('You do not have permission to take part in this boardroom', 'error');
+            return;
+        }
+        this.showToast(
+            error?.status === 502 || error?.status === 503
+                ? 'Boardroom is temporarily unavailable – please retry'
+                : 'AI response error – please try again',
+            'error'
+        );
+    }
+
+    /** Boardroom-level CUSTOM events: position_stated, resolution, state_conflict. */
+    _handleBoardroomEvent(name, value) {
+        let text = null;
+        if (name === 'position_stated') {
+            const who = value?.actor || 'Board member';
+            text = `${who} — ${value?.position ?? 'position'}${value?.summary ? `: ${value.summary}` : ''}`;
+        } else if (name === 'resolution') {
+            const body = typeof value === 'string' ? value : (value?.text || value?.summary || value?.decision || JSON.stringify(value));
+            text = `Resolution: ${body}`;
+        } else if (name === 'state_conflict') {
+            text = 'The boardroom state changed while deliberating; the latest decision may differ.';
+            this.showToast('Boardroom state conflict detected', 'info');
+        }
+        if (text) this._appendSystemNote(name, text);
+        this.dispatchEvent(new CustomEvent(`boardroom-${String(name).replace(/_/g, '-')}`, {
+            bubbles: true,
+            detail: { name, value, conversationId: this.conversationId },
+        }));
+    }
+
+    _appendSystemNote(kind, text) {
+        const messagesEl = this.elements?.messagesContainer;
+        if (!messagesEl) return;
+        const note = document.createElement('div');
+        note.className = `chatroom__message chatroom__message--system boardroom-note boardroom-note--${kind}`;
+        note.setAttribute('role', 'status');
+        note.textContent = text;
+        messagesEl.appendChild(note);
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    /**
+     * Load the last turns from mind (server hydrate; does not invoke the
+     * orchestrator). Autonomous EventGrid/cron turns surface here.
+     */
+    async _hydrateBoardroom() {
+        if (!this.copilotKit || this._running || this._hydrating) return;
+        this._hydrating = true;
+        try {
+            await this.copilotKit.hydrate();
+        } catch (error) {
+            if (error?.name !== 'AbortError') {
+                console.warn('[Boardroom] Hydrate failed (live-only mode):', error);
+                if (error?.status === 401) this._handleRunError(error);
+            }
+        } finally {
+            this._hydrating = false;
+            this._setRunning(false);
+        }
+    }
+
+    _renderSnapshot(messages) {
+        const messagesEl = this.elements?.messagesContainer;
+        if (!messagesEl || !Array.isArray(messages) || !messages.length) return;
+        this.clearMessages();
+        const emptyState = messagesEl.querySelector('.chatroom-empty-state');
+        if (emptyState) emptyState.hidden = true;
+        messages.forEach((m, i) => {
+            const id = `snapshot-${m.id ?? i}`;
+            if (m.role === 'user') {
+                const el = this._buildDomainUserMsg(m.content) ?? this._buildOwnMsg({
+                    text: m.content, time: '', author: 'You', initials: 'Y',
+                });
+                if (el) messagesEl.appendChild(el);
+                return;
+            }
+            this._createStreamingBubble(id, m.name || 'Boardroom');
+            this._finalizeStreamingBubble(id, String(m.content ?? ''));
+        });
     }
 
     initializeElements() {
@@ -545,6 +730,17 @@ class BoardroomApp extends ChatroomApp {
     // ── Agents / members list ───────────────────────────────────────────
 
     async loadAgents() {
+        if (this.copilotKit) {
+            // The AG-UI backend has no roster endpoint; every member is
+            // 'online' as part of the perpetual boardroom.
+            this.agents = BOARDROOM_ROSTER.map((a) => ({
+                ...a,
+                online: true,
+                avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(a.name)}&background=random&size=64`,
+            }));
+            this.renderAgents();
+            return;
+        }
         try {
             const response = await this._authedFetch(`${this.boardroomConfig.apiBase}/agents`);
             if (response.ok) {
@@ -618,19 +814,27 @@ class BoardroomApp extends ChatroomApp {
     }
 
     async selectAgent(agentId) {
+        // Selecting a member focuses/highlights them; in AG-UI mode the
+        // whole board stays in one shared thread (no per-agent routing).
+        this.boardroomElements.membersList.querySelectorAll('.chatroom-members-sidebar__item').forEach((item) => {
+            item.classList.remove('chatroom-members-sidebar__item--active');
+        });
+        const selectedItem = this.boardroomElements.membersList.querySelector(`[data-agent-id="${agentId}"]`);
+        if (selectedItem) {
+            selectedItem.classList.add('chatroom-members-sidebar__item--active');
+        }
+        this.currentAgent = this.agents.find((a) => a.agentId === agentId) || null;
+
+        if (this.copilotKit) {
+            this.dispatchEvent(new CustomEvent('boardroom-agent-selected', {
+                bubbles: true,
+                detail: { agent: this.currentAgent, conversationId: this.conversationId },
+            }));
+            return;
+        }
+
         this.showLoading('Connecting to agent...');
-
         try {
-            this.boardroomElements.membersList.querySelectorAll('.chatroom-members-sidebar__item').forEach((item) => {
-                item.classList.remove('chatroom-members-sidebar__item--active');
-            });
-            const selectedItem = this.boardroomElements.membersList.querySelector(`[data-agent-id="${agentId}"]`);
-            if (selectedItem) {
-                selectedItem.classList.add('chatroom-members-sidebar__item--active');
-            }
-
-            this.currentAgent = this.agents.find(a => a.agentId === agentId);
-
             const profileResponse = await this._authedFetch(`${this.boardroomConfig.apiBase}/agents/${agentId}`);
             if (profileResponse.ok) {
                 const profile = await profileResponse.json();
@@ -714,6 +918,15 @@ class BoardroomApp extends ChatroomApp {
         const text = inputEl.value.trim();
         if (!text) return;
 
+        if (this._running) {
+            this.showToast('The board is still deliberating – please wait', 'info');
+            return;
+        }
+        if (text.length > MAX_USER_TEXT_CHARS) {
+            this.showToast(`Message too long (max ${MAX_USER_TEXT_CHARS} characters)`, 'error');
+            return;
+        }
+
         inputEl.value = '';
         if (this.elements.charCount) {
             this.elements.charCount.textContent = `0/${this.config.maxLength}`;
@@ -735,11 +948,7 @@ class BoardroomApp extends ChatroomApp {
         }
 
         try {
-            await this.copilotKit.sendMessage(text, {
-                context: this.currentAgent
-                    ? [{ description: `Active boardroom agent: ${this.currentAgent.name} (${this.currentAgent.role || 'C-suite Executive'})` }]
-                    : [],
-            });
+            await this.copilotKit.sendMessage(text);
         } catch (error) {
             if (error.name !== 'AbortError') {
                 console.error('[CopilotKit] sendMessage failed:', error);
@@ -763,8 +972,9 @@ class BoardroomApp extends ChatroomApp {
 
         el.id = `copilotkit-msg-${messageId}`;
 
-        const agent = agentName || this.currentAgent?.name || 'AI';
-        const role = this.currentAgent?.role || 'AI Assistant';
+        const info = this._speakerInfo(agentName);
+        const agent = info?.name || agentName || 'Boardroom';
+        const role = info?.role || 'Board member';
 
         const avatarEl = el.querySelector('.chatroom__avatar');
         if (avatarEl) {
@@ -911,6 +1121,9 @@ class BoardroomApp extends ChatroomApp {
     disconnectedCallback() {
         if (this.copilotKit) {
             this.copilotKit.abort();
+        }
+        if (this._onVisibility) {
+            document.removeEventListener('visibilitychange', this._onVisibility);
         }
         super.disconnectedCallback();
         this.dispatchEvent(new CustomEvent('boardroom-disconnected', { bubbles: true }));
