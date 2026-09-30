@@ -108,15 +108,18 @@ export class CopilotKitClient {
       runId: CopilotKitClient.randomUUID(),
       messages: this.messages,
       state: {},
-      context: options.context || [],
-    };
-
-    if (this.agentName) {
-      requestBody.forwardedProps = {
-        agentName: this.agentName,
+      // AG-UI RunAgentInput requires `tools`, `context` (each {description, value})
+      // and `forwardedProps`; omitting them yields a 422 from the backend.
+      tools: options.tools || [],
+      context: (options.context || []).map((c) => ({
+        description: c.description ?? '',
+        value: typeof c.value === 'string' ? c.value : JSON.stringify(c.value ?? c.description ?? ''),
+      })),
+      forwardedProps: {
+        ...(this.agentName ? { agentName: this.agentName } : {}),
         ...options.forwardedProps,
-      };
-    }
+      },
+    };
 
     const headers = {
       'Content-Type': 'application/json',

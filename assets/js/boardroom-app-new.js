@@ -737,7 +737,10 @@ class BoardroomApp extends ChatroomApp {
         try {
             await this.copilotKit.sendMessage(text, {
                 context: this.currentAgent
-                    ? [{ description: `Active boardroom agent: ${this.currentAgent.name} (${this.currentAgent.role || 'C-suite Executive'})` }]
+                    ? [{
+                        description: 'Active boardroom agent',
+                        value: `${this.currentAgent.name} (${this.currentAgent.role || 'C-suite Executive'})`,
+                    }]
                     : [],
             });
         } catch (error) {
