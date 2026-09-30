@@ -70,7 +70,7 @@ const MSAL_CONFIG = {
     auth: {
         clientId: '09ee9579-46c7-4163-949c-f5f90067a70c',
         authority: 'https://login.microsoftonline.com/d1c9a3d1-9701-4605-b5aa-fef9728b0331',
-        redirectUri: 'https://boardroom.asisaga.com/boardroom'
+        redirectUri: 'https://boardroom.asisaga.com/boardroom/'
     },
     cache: {
         // localStorage (not the MSAL default sessionStorage) so the session
@@ -81,7 +81,7 @@ const MSAL_CONFIG = {
     },
 };
 
-const MSAL_API_SCOPES = ['PLACEHOLDER_API_SCOPE']; // e.g. 'api://<backend-client-id>/access_as_user'
+const MSAL_API_SCOPES = ['api://09ee9579-46c7-4163-949c-f5f90067a70c/access_as_user']; // e.g. 'api://<backend-client-id>/access_as_user'
 
 // sessionStorage key used to stash an in-progress draft message across the
 // full-tab redirect round-trip (see Option B: full-tab redirect, restore
