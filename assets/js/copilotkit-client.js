@@ -24,7 +24,7 @@ export class CopilotKitClient {
    *   particular auth mechanism. If omitted, no Authorization header is sent.
    */
   constructor(options = {}) {
-    this.runtimeUrl = options.runtimeUrl || '/api/copilotkit';
+    this.runtimeUrl = options.runtimeUrl || '/ag-ui';
     this.threadId = options.threadId || CopilotKitClient.randomUUID();
     this.agentName = options.agentName || null;
     this.extraHeaders = options.headers || {};
@@ -38,8 +38,13 @@ export class CopilotKitClient {
     this.state = options.state || {};
     this._toolCalls = {};
     this._runFinishedFired = false;
+    this._currentStep = null;    // active speaker (STEP_STARTED.stepName)
 
     // Callbacks
+    this.onStepStarted = null;   // (speaker) => void
+    this.onStepFinished = null;  // (speaker) => void
+    this.onCustomEvent = null;   // (name, value) => void
+    this.onRunResult = null;     // (result) => void  (RUN_FINISHED.result / digest)
     this.onRunStarted = null;    // (runId, threadId) => void
     this.onStateChange = null;   // (state) => void
     this.onToolCall = null;      // ({id, name, args, status, result}) => void
@@ -132,7 +137,10 @@ export class CopilotKitClient {
     const requestBody = {
       threadId: this.threadId,
       runId: CopilotKitClient.randomUUID(),
-      messages: this.messages,
+      // The backend relays only the latest user utterance to the boardroom
+      // (it discards assistant/tool history and rejects tool calls), and
+      // durable history lives server-side in mind. Send just the new turn.
+      messages: [this.messages[this.messages.length - 1]],
       state: { ...this.state, ...options.state },
       // AG-UI RunAgentInput requires `tools`, `context` (each {description, value})
       // and `forwardedProps`; omitting them yields a 422 from the backend.
@@ -177,7 +185,9 @@ export class CopilotKitClient {
 
       if (!response.ok) {
         const errText = await response.text().catch(() => response.statusText);
-        throw new Error(`CopilotKit runtime error ${response.status}: ${errText}`);
+        const err = new Error(`Boardroom error ${response.status}: ${errText}`);
+        err.status = response.status;
+        throw err;
       }
 
       const fullContent = await this._processSSEStream(response);
@@ -195,6 +205,50 @@ export class CopilotKitClient {
       }
       throw error;
     }
+  }
+
+  /**
+   * Hydrate the thread from the backend (known threadId, empty messages,
+   * no O invocation). The server answers from mind with the last turns as
+   * a MESSAGES_SNAPSHOT and a STATE_SNAPSHOT.
+   *
+   * @returns {Promise<void>}
+   */
+  async hydrate(options = {}) {
+    if (this.abortController) this.abortController.abort();
+    this.abortController = new AbortController();
+    this._runFinishedFired = false;
+
+    const headers = {
+      'Content-Type': 'application/json',
+      'Accept': 'text/event-stream',
+      ...this.extraHeaders,
+    };
+    if (this.getAccessToken) {
+      const token = await this.getAccessToken();
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+    }
+
+    const response = await fetch(this.runtimeUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        threadId: this.threadId,
+        runId: CopilotKitClient.randomUUID(),
+        messages: [],
+        state: {},
+        tools: [],
+        context: [],
+        forwardedProps: options.forwardedProps || {},
+      }),
+      signal: this.abortController.signal,
+    });
+    if (!response.ok) {
+      const err = new Error(`Boardroom hydrate error ${response.status}`);
+      err.status = response.status;
+      throw err;
+    }
+    await this._processSSEStream(response);
   }
 
   /** Abort any in-progress stream */
@@ -302,7 +356,7 @@ export class CopilotKitClient {
       case 'TextMessageStart': {
         messageBuffer[event.messageId] = '';
         if (this.onMessageStart) {
-          this.onMessageStart(event.messageId, event.agentName);
+          this.onMessageStart(event.messageId, event.agentName ?? this._currentStep);
         }
         return null;
       }
@@ -315,7 +369,7 @@ export class CopilotKitClient {
         if (!(event.messageId in messageBuffer)) {
           // Content without a START event – open the message implicitly
           messageBuffer[event.messageId] = '';
-          if (this.onMessageStart) this.onMessageStart(event.messageId, event.agentName);
+          if (this.onMessageStart) this.onMessageStart(event.messageId, event.agentName ?? this._currentStep);
         }
         messageBuffer[event.messageId] = (messageBuffer[event.messageId] ?? '') + chunk;
         if (this.onStreamChunk) {
@@ -343,6 +397,8 @@ export class CopilotKitClient {
 
       case 'RUN_FINISHED':
       case 'RunFinished': {
+        if (this.onRunResult) this.onRunResult(event.result ?? null);
+        this._currentStep = null;
         this._fireRunFinished(Object.values(messageBuffer).join(''));
         return null;
       }
@@ -350,6 +406,7 @@ export class CopilotKitClient {
       case 'RUN_ERROR':
       case 'RunError': {
         const err = new Error(event.message ?? 'CopilotKit run error');
+        err.code = event.code;
         if (this.onError) {
           this.onError(err);
         }
@@ -411,10 +468,19 @@ export class CopilotKitClient {
         if (this.onStateChange) this.onStateChange(this.state);
         return null;
       case 'MESSAGES_SNAPSHOT':
+        this.messages = (event.messages ?? []).slice(-this.maxHistory);
         if (this.onMessagesSnapshot) this.onMessagesSnapshot(event.messages ?? []);
         return null;
       case 'STEP_STARTED':
+        this._currentStep = event.stepName ?? null;
+        if (this.onStepStarted) this.onStepStarted(this._currentStep);
+        return null;
       case 'STEP_FINISHED':
+        if (this.onStepFinished) this.onStepFinished(event.stepName ?? null);
+        if (this._currentStep === event.stepName) this._currentStep = null;
+        return null;
+      case 'CUSTOM':
+        if (this.onCustomEvent) this.onCustomEvent(event.name, event.value);
         return null;
 
       default:
