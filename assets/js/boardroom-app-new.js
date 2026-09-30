@@ -68,9 +68,9 @@ import { CopilotKitClient } from '/assets/js/copilotkit-client.js';
 // reject even though login itself succeeds.
 const MSAL_CONFIG = {
     auth: {
-        clientId: 'PLACEHOLDER_CLIENT_ID',
-        authority: 'https://login.microsoftonline.com/PLACEHOLDER_TENANT_ID',
-        redirectUri: 'PLACEHOLDER_REDIRECT_URI', // e.g. https://boardroom.asisaga.com/
+        clientId: '09ee9579-46c7-4163-949c-f5f90067a70c',
+        authority: 'https://login.microsoftonline.com/d1c9a3d1-9701-4605-b5aa-fef9728b0331',
+        redirectUri: 'https://boardroom.asisaga.com/boardroom'
     },
     cache: {
         // localStorage (not the MSAL default sessionStorage) so the session
