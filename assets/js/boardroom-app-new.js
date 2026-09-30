@@ -14,7 +14,7 @@
  * freshly-built ones.
  *
  * The toggle strip and members sidebar shells are static HTML provided by
- * the chatroom layout (_includes/chatroom/toggle-strip.html and
+ * the chatroom layout (_includes/layouts/chatroom/toggle-strip.html and
  * members-sidebar.html) and their show/hide + search/filter behavior is
  * owned entirely by chatroom-panels.js. BoardroomApp's only responsibility
  * toward these panels is populating the members list's mount point
@@ -23,26 +23,70 @@
  *       data-status="online|away|offline"
  *       data-name="lowercase searchable name">
  *
- * Chat messages are routed through our own Azure Function backend
- * (`${apiBase}/chat`) which forwards to the Azure AI Foundry agent.
- * The CopilotKit runtime path is left in place but no longer called
- * automatically — see `sendMessage()` below.
+ * Chat messages are routed through the AG-UI protocol via CopilotKitClient
+ * (copilotkit-client.js) whenever copilotkit-runtime-url is configured —
+ * see _initCopilotKit() and sendMessage() below. The backend is a Python
+ * agent-framework service exposed via add_agent_framework_fastapi_endpoint
+ * (agent_framework.ag_ui), which speaks the standard AG-UI SSE event
+ * protocol; CopilotKitClient's dual-format event handling
+ * (TEXT_MESSAGE_START / TextMessageStart, etc.) already matches this
+ * protocol-level contract, not a CopilotKit-specific one. When no
+ * copilotkit-runtime-url is set, sendMessage() falls back to the inherited
+ * ChatroomApp.sendMessage() (REST api-endpoint, or local echo if unset).
  *
- * A simple team-password login gate runs before the chat UI is usable.
- * The resulting token is stored in localStorage under `access_token` —
- * matching the key copilotkit-client.js already reads — and attached as a
- * Bearer token on every API request.
- *
- * TEMP (standalone chat UI testing): the login gate, agent loading, and
- * live backend/CopilotKit calls in sendMessage() are disabled below so the
- * chat interface can be exercised on its own before agent orchestration is
- * wired up. Search for "TEMP" to find and revert each change.
+ * Authentication is via Microsoft Entra ID, using MSAL.js
+ * (@azure/msal-browser, loaded as a CDN UMD global — see
+ * _includes/msal-library.html) with a full-tab loginRedirect() flow (see
+ * _redirectToLogin()). MSAL_CONFIG and MSAL_API_SCOPES below currently
+ * hold PLACEHOLDER values — the tenant ID, client ID, redirect URI, and
+ * API scope must be filled in from the app's Entra app registration
+ * before this is deployed. Any in-progress draft message is preserved
+ * across the redirect round-trip via sessionStorage (see
+ * _redirectToLogin() / _restoreDraftMessage()). Acquired access tokens
+ * are attached as a Bearer token on every API request via _authedFetch(),
+ * which tries silent renewal first and falls back to a fresh interactive
+ * redirect only when needed.
  */
 
 import ChatroomApp from '/assets/js/chatroom-app.js';
 import { CopilotKitClient } from '/assets/js/copilotkit-client.js';
 
-const AUTH_TOKEN_KEY = 'access_token'; // matches copilotkit-client.js's localStorage key
+// ============================================================================
+// MSAL / Entra configuration
+// ============================================================================
+// PLACEHOLDER VALUES — replace all three before deploying. See Azure Portal →
+// Microsoft Entra ID → App registrations → (this app) → Overview (for
+// clientId / tenantId) and → Authentication (for the registered redirect
+// URI, which must match exactly).
+//
+// apiScope is the scope requested when acquiring a token for the backend
+// API specifically (as opposed to a login-only ID token) — typically
+// "api://<backend-app-client-id>/<scope-name>", e.g.
+// "api://00000000-0000-0000-0000-000000000000/access_as_user". Confirm the
+// exact value with whoever owns the backend's app registration ("Expose an
+// API" blade) — using the wrong scope produces a token the backend will
+// reject even though login itself succeeds.
+const MSAL_CONFIG = {
+    auth: {
+        clientId: 'PLACEHOLDER_CLIENT_ID',
+        authority: 'https://login.microsoftonline.com/PLACEHOLDER_TENANT_ID',
+        redirectUri: 'PLACEHOLDER_REDIRECT_URI', // e.g. https://boardroom.asisaga.com/
+    },
+    cache: {
+        // localStorage (not the MSAL default sessionStorage) so the session
+        // survives the full-tab redirect round-trip and persists across
+        // browser tabs/restarts, consistent with how boardroom previously
+        // persisted its auth token.
+        cacheLocation: 'localStorage',
+    },
+};
+
+const MSAL_API_SCOPES = ['PLACEHOLDER_API_SCOPE']; // e.g. 'api://<backend-client-id>/access_as_user'
+
+// sessionStorage key used to stash an in-progress draft message across the
+// full-tab redirect round-trip (see Option B: full-tab redirect, restore
+// visual state after). Cleared once restored.
+const DRAFT_STORAGE_KEY = 'boardroom_draft_message';
 
 class BoardroomApp extends ChatroomApp {
     constructor() {
@@ -53,7 +97,6 @@ class BoardroomApp extends ChatroomApp {
             showMembersSidebar: this.hasAttribute('show-members-sidebar'),
             showAgentProfiles: this.hasAttribute('show-agent-profiles'),
             apiBase: this.getAttribute('api-base') || '/api/boardroom',
-            loginEndpoint: this.getAttribute('login-endpoint') || '/api/login',
             enableScreenShare: this.hasAttribute('enable-screen-share'),
             enableVideoCall: this.hasAttribute('enable-video-call'),
             enableFileAttach: this.hasAttribute('enable-file-attach'),
@@ -70,101 +113,156 @@ class BoardroomApp extends ChatroomApp {
         // sendMessage(); kept so it's easy to revert if needed.
         this.copilotKit = null;
 
-        try {
-            this.authToken = localStorage.getItem(AUTH_TOKEN_KEY) || null;
-        } catch (err) {
-            console.warn('[Boardroom] localStorage unavailable:', err);
-            this.authToken = null;
-        }
+        // MSAL PublicClientApplication instance and the signed-in account,
+        // set up in _initMsal() (called from connectedCallback, since MSAL
+        // needs to process any redirect response before anything else runs).
+        this.msalClient = null;
+        this.msalAccount = null;
     }
 
-    // ── Auth: login gate ─────────────────────────────────────────────────
+    // ── Auth: Entra / MSAL ───────────────────────────────────────────────
+
+    /**
+     * Construct the MSAL client and process any pending redirect response
+     * (i.e. the user has just been sent back here after loginRedirect()).
+     * Must be called and awaited before any other MSAL API is used — MSAL
+     * requires handleRedirectPromise() to resolve first, even if there is
+     * no redirect in progress (it resolves to null in that case).
+     *
+     * Restores any draft message text that was stashed in sessionStorage
+     * before the redirect (see _redirectToLogin()).
+     */
+    async _initMsal() {
+        if (typeof msal === 'undefined') {
+            console.error('[Boardroom] MSAL library not loaded — check that msal-library.html is included before this module.');
+            return;
+        }
+
+        this.msalClient = new msal.PublicClientApplication(MSAL_CONFIG);
+        await this.msalClient.initialize();
+
+        let redirectResult = null;
+        try {
+            redirectResult = await this.msalClient.handleRedirectPromise();
+        } catch (err) {
+            console.error('[Boardroom] MSAL redirect handling failed:', err);
+        }
+
+        if (redirectResult?.account) {
+            this.msalAccount = redirectResult.account;
+        } else {
+            // Not returning from a redirect — check for an existing cached
+            // session (e.g. a previous tab already signed in).
+            const accounts = this.msalClient.getAllAccounts();
+            if (accounts.length > 0) {
+                this.msalAccount = accounts[0];
+            }
+        }
+
+        this._restoreDraftMessage();
+    }
 
     _isAuthenticated() {
-        return !!this.authToken;
+        return !!this.msalAccount;
     }
 
     /**
-     * Render a minimal password prompt over the chat area. Resolves once
-     * login succeeds and this.authToken is set. This overlay is genuinely
-     * dynamic/conditional UI (only shown when unauthenticated), so it
-     * remains JS-generated rather than static — unlike the chat shell,
-     * there is no meaningful "default" static version of a login form
-     * that should always be in the DOM.
+     * Save the current input field's draft text to sessionStorage, then
+     * navigate the full tab to Entra's login page via loginRedirect(). The
+     * page fully reloads on return; _initMsal() (called again on that
+     * fresh load) picks up the redirect result and _restoreDraftMessage()
+     * puts the draft text back.
+     * @returns {Promise<never>} Never resolves — the page navigates away.
      */
-    _showLoginGate() {
-        return new Promise((resolve) => {
-            const chatArea = this.querySelector('#chatArea') || this;
+    async _redirectToLogin() {
+        try {
+            const draft = this.elements?.inputField?.value;
+            if (draft) sessionStorage.setItem(DRAFT_STORAGE_KEY, draft);
+        } catch (err) {
+            console.warn('[Boardroom] Could not persist draft message before redirect:', err);
+        }
 
-            const overlay = document.createElement('div');
-            overlay.className = 'boardroom-login-gate';
-            overlay.innerHTML = `
-                <form class="boardroom-login-form">
-                    <h2 class="boardroom-login-title">Boardroom Access</h2>
-                    <input type="text" name="name" placeholder="Your name" class="boardroom-login-input" autocomplete="name" />
-                    <input type="password" name="password" placeholder="Team password" class="boardroom-login-input" autocomplete="current-password" required />
-                    <button type="submit" class="boardroom-login-submit">Enter</button>
-                    <p class="boardroom-login-error" hidden></p>
-                </form>
-            `;
+        await this.msalClient.loginRedirect({ scopes: MSAL_API_SCOPES });
+        // loginRedirect() navigates away; execution does not continue past
+        // this point on success.
+    }
 
-            const form = overlay.querySelector('.boardroom-login-form');
-            const errorEl = overlay.querySelector('.boardroom-login-error');
+    /**
+     * Restore a draft message stashed before a login redirect, if any.
+     * Called once from _initMsal(), after the static input field exists
+     * (hydration has already run by the time connectedCallback calls this).
+     */
+    _restoreDraftMessage() {
+        let draft = null;
+        try {
+            draft = sessionStorage.getItem(DRAFT_STORAGE_KEY);
+            if (draft) sessionStorage.removeItem(DRAFT_STORAGE_KEY);
+        } catch (err) {
+            console.warn('[Boardroom] Could not read persisted draft message:', err);
+            return;
+        }
+        if (draft && this.elements?.inputField) {
+            this.elements.inputField.value = draft;
+        }
+    }
 
-            form.addEventListener('submit', async (e) => {
-                e.preventDefault();
-                errorEl.hidden = true;
+    /**
+     * Acquire an access token for the backend API, silently if possible.
+     * Falls back to a full-tab redirect (_redirectToLogin) when silent
+     * acquisition fails — e.g. no cached session, or the session has
+     * expired and needs fresh interactive sign-in.
+     * @returns {Promise<string|null>} The access token, or null if a
+     *   redirect was triggered (in which case the page is navigating away).
+     */
+    async _acquireToken() {
+        if (!this.msalAccount) {
+            await this._redirectToLogin();
+            return null;
+        }
 
-                const name = form.querySelector('[name="name"]').value.trim();
-                const password = form.querySelector('[name="password"]').value;
-
-                try {
-                    const res = await fetch(this.boardroomConfig.loginEndpoint, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ name, password }),
-                    });
-
-                    if (!res.ok) {
-                        const body = await res.json().catch(() => ({}));
-                        errorEl.textContent = body.error || 'Login failed. Check the password and try again.';
-                        errorEl.hidden = false;
-                        return;
-                    }
-
-                    const data = await res.json();
-                    this.authToken = data.token;
-                    localStorage.setItem(AUTH_TOKEN_KEY, this.authToken);
-
-                    overlay.remove();
-                    resolve();
-                } catch (err) {
-                    console.error('[Boardroom] Login request failed:', err);
-                    errorEl.textContent = 'Could not reach the server. Please try again.';
-                    errorEl.hidden = false;
-                }
+        try {
+            const result = await this.msalClient.acquireTokenSilent({
+                scopes: MSAL_API_SCOPES,
+                account: this.msalAccount,
             });
-
-            chatArea.appendChild(overlay);
-        });
+            return result.accessToken;
+        } catch (err) {
+            // InteractionRequiredAuthError and similar — silent acquisition
+            // failed, fall back to interactive redirect.
+            console.warn('[Boardroom] Silent token acquisition failed, redirecting to login:', err);
+            await this._redirectToLogin();
+            return null;
+        }
     }
 
     async _authedFetch(url, options = {}) {
-        const doFetch = () => fetch(url, {
+        const token = await this._acquireToken();
+        if (!token) {
+            // _acquireToken() triggered a redirect; the page is navigating
+            // away, so this request will never complete. Return a
+            // never-resolving promise-like rejection is unnecessary since
+            // the page unload will abort everything shortly — just reject
+            // cleanly for any caller that might race the navigation.
+            throw new Error('Redirecting to login — request aborted.');
+        }
+
+        const doFetch = (accessToken) => fetch(url, {
             ...options,
             headers: {
                 ...(options.headers || {}),
-                ...(this.authToken ? { Authorization: `Bearer ${this.authToken}` } : {}),
+                Authorization: `Bearer ${accessToken}`,
             },
         });
 
-        let response = await doFetch();
+        let response = await doFetch(token);
 
         if (response.status === 401) {
-            localStorage.removeItem(AUTH_TOKEN_KEY);
-            this.authToken = null;
-            await this._showLoginGate();
-            response = await doFetch();
+            // Token was rejected despite MSAL considering it valid (e.g.
+            // revoked server-side) — force a fresh interactive login rather
+            // than retrying with the same stale token.
+            this.msalAccount = null;
+            await this._redirectToLogin();
+            throw new Error('Redirecting to login — request aborted.');
         }
 
         return response;
@@ -325,10 +423,19 @@ class BoardroomApp extends ChatroomApp {
         // only fires after a successful agent selection.
         this.hideLoading();
 
-        // TEMP: auth gate bypassed — chat UI only, agent orchestration wired up later
-        // if (!this._isAuthenticated()) {
-        //     await this._showLoginGate();
-        // }
+        // Process any pending MSAL redirect response (or pick up an
+        // existing cached session) before deciding whether to require
+        // sign-in. Runs after super.connectedCallback() so hydration has
+        // already populated this.elements.inputField, which
+        // _restoreDraftMessage() (called from within _initMsal()) needs.
+        await this._initMsal();
+
+        if (!this._isAuthenticated()) {
+            // Navigates the whole tab away to Entra's login page; nothing
+            // after this line runs on this page load.
+            await this._redirectToLogin();
+            return;
+        }
 
         await this.initializeBoardroom();
 
@@ -341,10 +448,9 @@ class BoardroomApp extends ChatroomApp {
     async initializeBoardroom() {
         this._initCopilotKit();
 
-        // TEMP: agent loading disabled until backend is wired up
-        // if (this.boardroomConfig.showAgentProfiles) {
-        //     await this.loadAgents();
-        // }
+        if (this.boardroomConfig.showAgentProfiles) {
+            await this.loadAgents();
+        }
 
         this.attachBoardroomEventHandlers();
     }
@@ -358,7 +464,13 @@ class BoardroomApp extends ChatroomApp {
         const runtimeUrl = this.boardroomConfig.copilotKitRuntimeUrl;
         if (!runtimeUrl) return;
 
-        this.copilotKit = new CopilotKitClient({ runtimeUrl });
+        this.copilotKit = new CopilotKitClient({
+            runtimeUrl,
+            // _acquireToken() tries silent MSAL renewal first and only
+            // falls back to an interactive redirect if that fails — see
+            // its definition above for the full behavior.
+            getAccessToken: () => this._acquireToken(),
+        });
 
         this.copilotKit.onStreamChunk = (chunk, messageId) => {
             this._appendStreamChunk(chunk, messageId);
@@ -574,35 +686,21 @@ class BoardroomApp extends ChatroomApp {
     /**
      * Send the current input.
      *
-     * Routes through CopilotKit when configured; otherwise falls back to
-     * the inherited ChatroomApp.sendMessage(), which already handles
-     * slash-commands/MCP apps and posting to config.apiEndpoint (or a
-     * local echo when no apiEndpoint is set) using the inherited
-     * chatroom__* message rendering into the static .chatroom-messages
-     * container.
-     *
-     * TEMP (standalone chat UI testing): CopilotKit and the backend fallback
-     * are both bypassed below in favor of a local echo, since neither is
-     * wired up yet. Restore the commented-out block once agent
-     * orchestration is ready.
+     * Routes through CopilotKit (AG-UI protocol) when configured — i.e.
+     * when copilotkit-runtime-url was set, so this.copilotKit exists (see
+     * _initCopilotKit()). Otherwise falls back to the inherited
+     * ChatroomApp.sendMessage(), which handles slash-commands/MCP apps and
+     * posting to config.apiEndpoint (or a local echo when no apiEndpoint
+     * is set) using the inherited chatroom__* message rendering into the
+     * static .chatroom-messages container.
      */
     async sendMessage() {
-        // TEMP: no backend/agent wired up yet — local echo only, via the
-        // inherited super.sendMessage(), which already falls back to a
-        // local echo when config.apiEndpoint is unset.
-        await super.sendMessage();
-        return;
-
-        /* ── Restore this block once backend/CopilotKit orchestration is ready ──
-
         if (this.copilotKit) {
             await this._sendViaCopilotKit();
             return;
         }
 
         await super.sendMessage();
-
-        ── end restore block ── */
     }
 
     /**
