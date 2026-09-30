@@ -1,5 +1,5 @@
 /**
- * CopilotKit Client for Business Infinity Boardroom
+ * CopilotKit Client for Boardroom
  *
  * Connects the boardroom chatroom to a server-side CopilotKit runtime
  * using the AG-UI HTTP protocol (@copilotkit/sdk-js compatible).
@@ -17,6 +17,11 @@ export class CopilotKitClient {
    * @param {string} [options.agentName]   - Default agent name to route messages to
    * @param {object} [options.headers]     - Extra HTTP headers (e.g. Authorization)
    * @param {number} [options.maxHistory]  - Maximum messages to retain in history (default: 50)
+   * @param {() => Promise<string|null>} [options.getAccessToken] - Async function
+   *   returning a Bearer token to attach to each request, called fresh before
+   *   every sendMessage(). Lets the caller manage token acquisition/refresh
+   *   (e.g. via MSAL silent renewal) rather than this client owning any
+   *   particular auth mechanism. If omitted, no Authorization header is sent.
    */
   constructor(options = {}) {
     this.runtimeUrl = options.runtimeUrl || '/api/copilotkit';
@@ -24,6 +29,7 @@ export class CopilotKitClient {
     this.agentName = options.agentName || null;
     this.extraHeaders = options.headers || {};
     this.maxHistory = options.maxHistory ?? 50;
+    this.getAccessToken = options.getAccessToken || null;
     this.messages = [];
     this.abortController = null;
 
@@ -119,14 +125,17 @@ export class CopilotKitClient {
       ...options.headers,
     };
 
-    // Read the Bearer token from localStorage – consistent with the existing
-    // boardroomApi.js pattern. Protect against XSS by enforcing strict CSP headers
-    // on the server; avoid storing sensitive tokens in localStorage in high-risk contexts.
-    const token = typeof localStorage !== 'undefined'
-      ? localStorage.getItem('access_token')
-      : null;
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
+    // Acquire the Bearer token via the caller-supplied getAccessToken
+    // callback (e.g. MSAL silent token acquisition), if one was provided.
+    if (this.getAccessToken) {
+      try {
+        const token = await this.getAccessToken();
+        if (token) {
+          headers['Authorization'] = `Bearer ${token}`;
+        }
+      } catch (err) {
+        console.error('[CopilotKit] getAccessToken() failed:', err);
+      }
     }
 
     try {
