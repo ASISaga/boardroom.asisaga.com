@@ -88,6 +88,13 @@ const MSAL_API_SCOPES = ['api://09ee9579-46c7-4163-949c-f5f90067a70c/access_as_u
 // visual state after). Cleared once restored.
 const DRAFT_STORAGE_KEY = 'boardroom_draft_message';
 
+// sessionStorage key recording when a backend 401 last forced a login
+// redirect. If the backend still answers 401 right after a fresh sign-in,
+// the token itself is being rejected (e.g. audience/scope/role mismatch),
+// so redirecting again would loop forever. See _handleUnauthorized().
+const AUTH_REDIRECT_STORAGE_KEY = 'boardroom_auth_redirect_at';
+const AUTH_REDIRECT_COOLDOWN_MS = 5 * 60 * 1000;
+
 // The backend (ASISaga/boardroom, POST /ag-ui) runs ONE perpetual boardroom
 // per company; the Founder and C-suite speak as AG-UI steps
 // (STEP_STARTED.stepName). It exposes no roster REST endpoint, so the members
@@ -277,13 +284,55 @@ class BoardroomApp extends ChatroomApp {
         if (response.status === 401) {
             // Token was rejected despite MSAL considering it valid (e.g.
             // revoked server-side) — force a fresh interactive login rather
-            // than retrying with the same stale token.
-            this.msalAccount = null;
-            await this._redirectToLogin();
-            throw new Error('Redirecting to login — request aborted.');
+            // than retrying with the same stale token, unless we only just
+            // came back from one (which would loop).
+            const err = new Error(`Request rejected by backend (401): ${url}`);
+            err.status = 401;
+            if (await this._handleUnauthorized(err)) {
+                throw new Error('Redirecting to login — request aborted.');
+            }
+            throw err;
         }
 
+        this._clearAuthRedirectGuard();
         return response;
+    }
+
+    /**
+     * Handle a backend 401. Redirects to Entra sign-in at most once per
+     * AUTH_REDIRECT_COOLDOWN_MS: if the backend still rejects the token
+     * right after a fresh sign-in, re-authenticating cannot help and would
+     * reload the page in an endless loop, so surface an error instead.
+     * @returns {Promise<boolean>} true if a login redirect was triggered.
+     */
+    async _handleUnauthorized(error) {
+        let lastRedirect = 0;
+        try {
+            lastRedirect = Number(sessionStorage.getItem(AUTH_REDIRECT_STORAGE_KEY)) || 0;
+        } catch (_) { /* storage unavailable — fall through */ }
+
+        if (Date.now() - lastRedirect < AUTH_REDIRECT_COOLDOWN_MS) {
+            console.error(
+                '[Boardroom] Backend rejected the access token immediately after sign-in; ' +
+                'not redirecting again to avoid a login loop. Check the API scope / audience ' +
+                'and App Role configuration.', error
+            );
+            this.showToast('Signed in, but the boardroom service rejected your credentials', 'error');
+            return false;
+        }
+
+        try {
+            sessionStorage.setItem(AUTH_REDIRECT_STORAGE_KEY, String(Date.now()));
+        } catch (_) { /* best effort */ }
+        this.msalAccount = null;
+        await this._redirectToLogin();
+        return true;
+    }
+
+    _clearAuthRedirectGuard() {
+        try {
+            sessionStorage.removeItem(AUTH_REDIRECT_STORAGE_KEY);
+        } catch (_) { /* best effort */ }
     }
 
     // ── Hydration hooks (called by inherited ChatroomApp._hydrate()) ──────
@@ -587,8 +636,7 @@ class BoardroomApp extends ChatroomApp {
         if (error?.status === 401 || error?.status === 403) {
             // Token missing/expired, or lacking the `participant` App Role.
             if (error.status === 401) {
-                this.msalAccount = null;
-                this._redirectToLogin();
+                this._handleUnauthorized(error);
                 return;
             }
             this.showToast('You do not have permission to take part in this boardroom', 'error');
@@ -642,6 +690,7 @@ class BoardroomApp extends ChatroomApp {
         this._hydrating = true;
         try {
             await this.copilotKit.hydrate();
+            this._clearAuthRedirectGuard();
         } catch (error) {
             if (error?.name !== 'AbortError') {
                 console.warn('[Boardroom] Hydrate failed (live-only mode):', error);
