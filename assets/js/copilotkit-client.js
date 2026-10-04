@@ -7,6 +7,14 @@
  * Protocol: POST JSON → Accept: text/event-stream SSE response
  * Events follow the AG-UI standard (TextMessageStart/Content/End, ToolCallStart/Args/End,
  * RunStarted, RunFinished, RunError, StateSnapshot, StateDelta).
+ *
+ * Run lifecycle (Boardroom spec 07): every request is one AG-UI run, keyed by
+ * its own runId, so several runs may be in flight on the shared thread at
+ * once (user interjection). Each run has its own AbortController, active
+ * step and message buffer. Only a RUN_FINISHED whose `result` is a Digest is
+ * a completed turn; a hydrate's RUN_FINISHED carries no result and a
+ * cancelled turn's carries `{cancelled: true}`. RUN_ERROR is terminal and is
+ * never followed by RUN_FINISHED.
  */
 
 export class CopilotKitClient {
@@ -22,6 +30,9 @@ export class CopilotKitClient {
    *   every sendMessage(). Lets the caller manage token acquisition/refresh
    *   (e.g. via MSAL silent renewal) rather than this client owning any
    *   particular auth mechanism. If omitted, no Authorization header is sent.
+   * @param {string[]} [options.roster]    - Known speaker role ids. When set,
+   *   a STEP_STARTED/STEP_FINISHED whose stepName is not in the roster is
+   *   informative-only: it is ignored and never rendered as a speaker.
    */
   constructor(options = {}) {
     this.runtimeUrl = options.runtimeUrl || '/ag-ui';
@@ -30,30 +41,111 @@ export class CopilotKitClient {
     this.extraHeaders = options.headers || {};
     this.maxHistory = options.maxHistory ?? 50;
     this.getAccessToken = options.getAccessToken || null;
+    this.roster = Array.isArray(options.roster)
+      ? new Set(options.roster.map((r) => String(r).toLowerCase()))
+      : null;
     this.messages = [];
-    this.abortController = null;
+
+    // In-flight runs keyed by runId: {runId, source, controller, step,
+    // messageBuffer, speakers, finished, error, result}. Each run owns its
+    // AbortController, so a new send never aborts an in-flight turn.
+    this._runs = new Map();
+
+    // Last completed turn (Digest-bearing RUN_FINISHED). Cancelled turns and
+    // hydrates never advance it (07).
+    this.lastSeen = null;
 
     // Shared agent state (AG-UI STATE_SNAPSHOT / STATE_DELTA), round-tripped
     // to the backend in each RunAgentInput.state.
     this.state = options.state || {};
     this._toolCalls = {};
-    this._runFinishedFired = false;
-    this._currentStep = null;    // active speaker (STEP_STARTED.stepName)
 
-    // Callbacks
-    this.onStepStarted = null;   // (speaker) => void
-    this.onStepFinished = null;  // (speaker) => void
-    this.onCustomEvent = null;   // (name, value) => void
-    this.onRunResult = null;     // (result) => void  (RUN_FINISHED.result / digest)
+    // Callbacks. `runId` is the AG-UI run the event belongs to.
+    this.onStepStarted = null;   // (speaker, runId) => void
+    this.onStepFinished = null;  // (speaker, runId) => void
+    this.onCustomEvent = null;   // (name, value, runId) => void
+    this.onRunResult = null;     // (result, runId) => void  (any RUN_FINISHED.result, may be undefined)
+    this.onTurnComplete = null;  // (digest, runId) => void  (Digest-bearing RUN_FINISHED only)
     this.onRunStarted = null;    // (runId, threadId) => void
     this.onStateChange = null;   // (state) => void
     this.onToolCall = null;      // ({id, name, args, status, result}) => void
     this.onMessagesSnapshot = null; // (messages) => void
-    this.onStreamChunk = null;   // (chunk, messageId) => void
-    this.onMessageStart = null;  // (messageId, agentName?) => void
-    this.onMessageEnd = null;    // (messageId, fullContent) => void
-    this.onRunFinished = null;   // (finalContent) => void
-    this.onError = null;         // (error) => void
+    this.onStreamChunk = null;   // (chunk, messageId, runId) => void
+    this.onMessageStart = null;  // (messageId, agentName?, runId) => void
+    this.onMessageEnd = null;    // (messageId, fullContent, runId) => void
+    this.onRunFinished = null;   // (finalContent, runId) => void  (never after RUN_ERROR)
+    this.onError = null;         // (error, runId?) => void  (error.code from RUN_ERROR)
+  }
+
+  // ── Run classification ─────────────────────────────────────────────────
+
+  /**
+   * True only for a RUN_FINISHED.result that is a turn's Digest: present and
+   * not the `{cancelled: true}` of a cancelled turn (07). A hydrate's
+   * RUN_FINISHED carries no result and is not a turn.
+   */
+  static isCompletedTurn(result) {
+    return result != null && !(typeof result === 'object' && result.cancelled === true);
+  }
+
+  /** True while any run (send or hydrate) is in flight. */
+  isRunning() {
+    for (const run of this._runs.values()) {
+      if (!run.finished) return true;
+    }
+    return false;
+  }
+
+  /** In-flight runs, oldest first: [{runId, source}]. */
+  inFlightRuns() {
+    return [...this._runs.values()]
+      .filter((run) => !run.finished)
+      .map(({ runId, source }) => ({ runId, source }));
+  }
+
+  _isRosterStep(stepName) {
+    if (!stepName) return false;
+    return !this.roster || this.roster.has(String(stepName).toLowerCase());
+  }
+
+  _newRun(source) {
+    const run = {
+      runId: CopilotKitClient.randomUUID(),
+      source,
+      controller: new AbortController(),
+      step: null,            // active speaker of this run (STEP_STARTED.stepName)
+      messageBuffer: {},     // messageId -> accumulated text
+      speakers: {},          // messageId -> speaker
+      messages: [],          // completed assistant messages, one per messageId
+      finished: false,       // RUN_FINISHED or RUN_ERROR seen
+      finishedFired: false,  // onRunFinished delivered
+      error: null,           // Error built from RUN_ERROR
+      result: undefined,     // RUN_FINISHED.result
+    };
+    this._runs.set(run.runId, run);
+    return run;
+  }
+
+  async _buildHeaders(extra = {}) {
+    const headers = {
+      'Content-Type': 'application/json',
+      'Accept': 'text/event-stream',
+      ...this.extraHeaders,
+      ...extra,
+    };
+    // Acquire the Bearer token via the caller-supplied getAccessToken
+    // callback (e.g. MSAL silent token acquisition), if one was provided.
+    if (this.getAccessToken) {
+      try {
+        const token = await this.getAccessToken();
+        if (token) {
+          headers['Authorization'] = `Bearer ${token}`;
+        }
+      } catch (err) {
+        console.error('[CopilotKit] getAccessToken() failed:', err);
+      }
+    }
+    return headers;
   }
 
   // ── UUID helper ──────────────────────────────────────────────────────────
@@ -76,6 +168,7 @@ export class CopilotKitClient {
     this.messages = [];
     this.state = {};
     this._toolCalls = {};
+    this.lastSeen = null;
   }
 
   /** Continue an existing thread (e.g. the boardroom conversation id) */
@@ -84,6 +177,7 @@ export class CopilotKitClient {
     this.messages = [];
     this.state = {};
     this._toolCalls = {};
+    this.lastSeen = null;
   }
 
   /** Merge boardroom-level state that is sent with every run */
@@ -103,16 +197,19 @@ export class CopilotKitClient {
 
   // ── Message history ──────────────────────────────────────────────────────
 
-  _addMessage(role, content) {
-    this.messages.push({
-      id: CopilotKitClient.randomUUID(),
+  _addMessage(role, content, extra = {}) {
+    const message = {
+      id: extra.id || CopilotKitClient.randomUUID(),
       role,
       content,
-    });
+      ...(extra.name ? { name: extra.name } : {}),
+    };
+    this.messages.push(message);
     // Trim history to stay within the configured maximum
     if (this.messages.length > this.maxHistory) {
       this.messages = this.messages.slice(-this.maxHistory);
     }
+    return message;
   }
 
   // ── Core send ────────────────────────────────────────────────────────────
@@ -120,27 +217,28 @@ export class CopilotKitClient {
   /**
    * Send a user message to the CopilotKit runtime and stream the response.
    *
+   * The run gets its own AbortController: sending while another turn is in
+   * flight (07 user interjection) never aborts that turn's stream.
+   *
    * @param {string} userMessage - The user's text input
    * @param {object} [options]   - Additional options (context, headers, etc.)
-   * @returns {Promise<string>}  - Full AI response text
+   * @param {string} [options.source] - Envelope source of the run (default 'agui')
+   * @returns {Promise<{runId: string, result: *, messages: Array<{id, name, content}>}>}
+   *   The run's RUN_FINISHED.result and one assistant message per
+   *   messageId/speaker. Rejects with the RUN_ERROR (error.code, error.runId)
+   *   when the run fails.
    */
   async sendMessage(userMessage, options = {}) {
-    this._addMessage('user', userMessage);
-
-    // Abort any in-flight request
-    if (this.abortController) {
-      this.abortController.abort();
-    }
-    this.abortController = new AbortController();
-    this._runFinishedFired = false;
+    const userTurn = this._addMessage('user', userMessage);
+    const run = this._newRun(options.source || 'agui');
 
     const requestBody = {
       threadId: this.threadId,
-      runId: CopilotKitClient.randomUUID(),
+      runId: run.runId,
       // The backend relays only the latest user utterance to the boardroom
       // (it discards assistant/tool history and rejects tool calls), and
       // durable history lives server-side in mind. Send just the new turn.
-      messages: [this.messages[this.messages.length - 1]],
+      messages: [userTurn],
       state: { ...this.state, ...options.state },
       // AG-UI RunAgentInput requires `tools`, `context` (each {description, value})
       // and `forwardedProps`; omitting them yields a 422 from the backend.
@@ -155,32 +253,13 @@ export class CopilotKitClient {
       },
     };
 
-    const headers = {
-      'Content-Type': 'application/json',
-      'Accept': 'text/event-stream',
-      ...this.extraHeaders,
-      ...options.headers,
-    };
-
-    // Acquire the Bearer token via the caller-supplied getAccessToken
-    // callback (e.g. MSAL silent token acquisition), if one was provided.
-    if (this.getAccessToken) {
-      try {
-        const token = await this.getAccessToken();
-        if (token) {
-          headers['Authorization'] = `Bearer ${token}`;
-        }
-      } catch (err) {
-        console.error('[CopilotKit] getAccessToken() failed:', err);
-      }
-    }
-
     try {
+      const headers = await this._buildHeaders(options.headers);
       const response = await fetch(this.runtimeUrl, {
         method: 'POST',
         headers,
         body: JSON.stringify(requestBody),
-        signal: this.abortController.signal,
+        signal: run.controller.signal,
       });
 
       if (!response.ok) {
@@ -190,83 +269,106 @@ export class CopilotKitClient {
         throw err;
       }
 
-      const fullContent = await this._processSSEStream(response);
+      await this._processSSEStream(response, run);
 
-      if (fullContent) {
-        this._addMessage('assistant', fullContent);
-      }
+      if (run.error) throw run.error;
 
-      return fullContent;
+      return { runId: run.runId, result: run.result, messages: [...run.messages] };
     } catch (error) {
-      if (error.name !== 'AbortError') {
+      run.finished = true;
+      // A RUN_ERROR was already reported through onError when it arrived.
+      if (error.name !== 'AbortError' && error !== run.error) {
         if (this.onError) {
-          this.onError(error);
+          this.onError(error, run.runId);
         }
       }
       throw error;
+    } finally {
+      run.finished = true;
+      this._runs.delete(run.runId);
     }
   }
 
   /**
    * Hydrate the thread from the backend (known threadId, empty messages,
    * no O invocation). The server answers from mind with the last turns as
-   * a MESSAGES_SNAPSHOT and a STATE_SNAPSHOT.
+   * a MESSAGES_SNAPSHOT and a STATE_SNAPSHOT. A hydrate is not a turn: its
+   * RUN_FINISHED carries no result and never fires onTurnComplete.
    *
    * @returns {Promise<void>}
    */
   async hydrate(options = {}) {
-    if (this.abortController) this.abortController.abort();
-    this.abortController = new AbortController();
-    this._runFinishedFired = false;
-
-    const headers = {
-      'Content-Type': 'application/json',
-      'Accept': 'text/event-stream',
-      ...this.extraHeaders,
-    };
-    if (this.getAccessToken) {
-      const token = await this.getAccessToken();
-      if (token) headers['Authorization'] = `Bearer ${token}`;
+    const run = this._newRun('hydrate');
+    try {
+      const headers = await this._buildHeaders();
+      const response = await fetch(this.runtimeUrl, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          threadId: this.threadId,
+          runId: run.runId,
+          messages: [],
+          state: {},
+          tools: [],
+          context: [],
+          forwardedProps: options.forwardedProps || {},
+        }),
+        signal: run.controller.signal,
+      });
+      if (!response.ok) {
+        const err = new Error(`Boardroom hydrate error ${response.status}`);
+        err.status = response.status;
+        throw err;
+      }
+      await this._processSSEStream(response, run);
+      if (run.error) throw run.error;
+    } finally {
+      run.finished = true;
+      this._runs.delete(run.runId);
     }
-
-    const response = await fetch(this.runtimeUrl, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        threadId: this.threadId,
-        runId: CopilotKitClient.randomUUID(),
-        messages: [],
-        state: {},
-        tools: [],
-        context: [],
-        forwardedProps: options.forwardedProps || {},
-      }),
-      signal: this.abortController.signal,
-    });
-    if (!response.ok) {
-      const err = new Error(`Boardroom hydrate error ${response.status}`);
-      err.status = response.status;
-      throw err;
-    }
-    await this._processSSEStream(response);
   }
 
-  /** Abort any in-progress stream */
-  abort() {
-    if (this.abortController) {
-      this.abortController.abort();
-      this.abortController = null;
+  /**
+   * Abort in-progress streams: the given run, or every in-flight run
+   * (sends and hydrates) when no runId is passed (e.g. on unload).
+   */
+  abort(runId) {
+    for (const run of [...this._runs.values()]) {
+      if (runId && run.runId !== runId) continue;
+      run.controller.abort();
     }
   }
 
   // ── SSE stream processing ────────────────────────────────────────────────
 
-  async _processSSEStream(response) {
+  async _processSSEStream(response, run) {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
-    const messageBuffer = {};
     let fullContent = '';
+
+    const handleLine = (line) => {
+      if (!line.startsWith('data:')) return;
+      const dataStr = line.slice(5).trim();
+      if (!dataStr || dataStr === '[DONE]') return;
+      let event;
+      try {
+        event = JSON.parse(dataStr);
+      } catch (parseError) {
+        // Malformed JSON – log at debug level and skip
+        console.debug('[CopilotKit] Skipping unparseable SSE data:', dataStr, parseError);
+        return;
+      }
+      // Nothing may follow a run's RUN_FINISHED or RUN_ERROR (AG-UI lifecycle).
+      if (run.finished) {
+        console.debug('[CopilotKit] Ignoring event after run end:', event.type);
+        return;
+      }
+      const chunk = this._processEvent(event, run);
+      if (chunk) {
+        fullContent += chunk;
+      }
+    };
 
     try {
       while (true) {
@@ -277,36 +379,26 @@ export class CopilotKitClient {
         // Split on newlines; keep incomplete last chunk
         const lines = buffer.split(/\r?\n/);
         buffer = lines.pop() ?? '';
-
-        for (const line of lines) {
-          if (!line.startsWith('data:')) continue;
-          const dataStr = line.slice(5).trim();
-          if (!dataStr || dataStr === '[DONE]') continue;
-
-          try {
-            const event = JSON.parse(dataStr);
-            const chunk = this._processEvent(event, messageBuffer);
-            if (chunk) {
-              fullContent += chunk;
-            }
-          } catch (parseError) {
-            // Malformed JSON – log at debug level and skip
-            console.debug('[CopilotKit] Skipping unparseable SSE data:', dataStr, parseError);
-          }
-        }
+        lines.forEach(handleLine);
       }
+      buffer += decoder.decode();
+      if (buffer) handleLine(buffer);
     } finally {
       reader.releaseLock();
     }
 
-    this._fireRunFinished(fullContent);
+    // A run that errored is not a finished run (07: RUN_ERROR is terminal and
+    // is not RUN_FINISHED). A stream that closed without either still ends
+    // the run for the UI.
+    if (!run.error) this._fireRunFinished(fullContent, run);
     return fullContent;
   }
 
-  _fireRunFinished(content) {
-    if (this._runFinishedFired) return;
-    this._runFinishedFired = true;
-    if (this.onRunFinished) this.onRunFinished(content);
+  _fireRunFinished(content, run) {
+    if (run.finishedFired) return;
+    run.finishedFired = true;
+    run.finished = true;
+    if (this.onRunFinished) this.onRunFinished(content, run.runId);
   }
 
   _emitToolCall(id) {
@@ -343,20 +435,22 @@ export class CopilotKitClient {
    * Handle a single AG-UI / legacy-CopilotKit SSE event.
    * Supports both camelCase legacy names and SCREAMING_SNAKE AG-UI names.
    *
-   * @param {object} event         - Parsed JSON event
-   * @param {object} messageBuffer - Accumulation buffer keyed by messageId
-   * @returns {string|null}        - Streamed text chunk, if any
+   * @param {object} event - Parsed JSON event
+   * @param {object} run   - The run the event belongs to (see _newRun)
+   * @returns {string|null} - Streamed text chunk, if any
    */
-  _processEvent(event, messageBuffer) {
+  _processEvent(event, run) {
     const { type } = event;
+    const messageBuffer = run.messageBuffer;
 
     switch (type) {
       // ── Message start ──
       case 'TEXT_MESSAGE_START':
       case 'TextMessageStart': {
         messageBuffer[event.messageId] = '';
+        run.speakers[event.messageId] = event.agentName ?? run.step;
         if (this.onMessageStart) {
-          this.onMessageStart(event.messageId, event.agentName ?? this._currentStep);
+          this.onMessageStart(event.messageId, run.speakers[event.messageId], run.runId);
         }
         return null;
       }
@@ -369,11 +463,14 @@ export class CopilotKitClient {
         if (!(event.messageId in messageBuffer)) {
           // Content without a START event – open the message implicitly
           messageBuffer[event.messageId] = '';
-          if (this.onMessageStart) this.onMessageStart(event.messageId, event.agentName ?? this._currentStep);
+          run.speakers[event.messageId] = event.agentName ?? run.step;
+          if (this.onMessageStart) {
+            this.onMessageStart(event.messageId, run.speakers[event.messageId], run.runId);
+          }
         }
         messageBuffer[event.messageId] = (messageBuffer[event.messageId] ?? '') + chunk;
         if (this.onStreamChunk) {
-          this.onStreamChunk(chunk, event.messageId);
+          this.onStreamChunk(chunk, event.messageId, run.runId);
         }
         return chunk;
       }
@@ -382,33 +479,61 @@ export class CopilotKitClient {
       case 'TEXT_MESSAGE_END':
       case 'TextMessageEnd': {
         const full = messageBuffer[event.messageId] ?? '';
+        const speaker = run.speakers[event.messageId] ?? null;
+        // One history entry per messageId (per speaker per turn) — never
+        // every speaker's deltas joined into one assistant message.
+        if (full) {
+          const message = this._addMessage('assistant', full, { id: event.messageId, name: speaker });
+          run.messages.push({ id: message.id, name: speaker, content: full });
+        }
         if (this.onMessageEnd) {
-          this.onMessageEnd(event.messageId, full);
+          this.onMessageEnd(event.messageId, full, run.runId);
         }
         delete messageBuffer[event.messageId];
+        delete run.speakers[event.messageId];
         return null;
       }
 
       // ── Run lifecycle ──
       case 'RUN_STARTED':
       case 'RunStarted':
-        if (this.onRunStarted) this.onRunStarted(event.runId, event.threadId);
+        if (this.onRunStarted) this.onRunStarted(event.runId ?? run.runId, event.threadId);
         return null;
 
       case 'RUN_FINISHED':
       case 'RunFinished': {
-        if (this.onRunResult) this.onRunResult(event.result ?? null);
-        this._currentStep = null;
-        this._fireRunFinished(Object.values(messageBuffer).join(''));
+        const result = event.result;
+        run.result = result;
+        run.step = null;
+        run.finished = true;
+        if (this.onRunResult) this.onRunResult(result, run.runId);
+        // Only a Digest-bearing RUN_FINISHED is a completed turn (07): a
+        // hydrate carries no result, and a cancelled turn's RUN_FINISHED
+        // MUST NOT advance last_seen.
+        if (run.source !== 'hydrate' && CopilotKitClient.isCompletedTurn(result)) {
+          this.lastSeen = {
+            runId: run.runId,
+            turnId: result?.turn_id ?? null,
+            ts: result?.ts ?? new Date().toISOString(),
+          };
+          if (this.onTurnComplete) this.onTurnComplete(result, run.runId);
+        }
+        this._fireRunFinished(Object.values(messageBuffer).join(''), run);
         return null;
       }
 
       case 'RUN_ERROR':
       case 'RunError': {
+        // Terminal: nothing follows it, and it is never a RUN_FINISHED.
         const err = new Error(event.message ?? 'CopilotKit run error');
+        err.name = 'RunError';
         err.code = event.code;
+        err.runId = run.runId;
+        run.error = err;
+        run.step = null;
+        run.finished = true;
         if (this.onError) {
-          this.onError(err);
+          this.onError(err, run.runId);
         }
         return null;
       }
@@ -471,16 +596,25 @@ export class CopilotKitClient {
         this.messages = (event.messages ?? []).slice(-this.maxHistory);
         if (this.onMessagesSnapshot) this.onMessagesSnapshot(event.messages ?? []);
         return null;
-      case 'STEP_STARTED':
-        this._currentStep = event.stepName ?? null;
-        if (this.onStepStarted) this.onStepStarted(this._currentStep);
+
+      // ── Speaker presence (07: stepName is the speaker's role id) ──
+      case 'STEP_STARTED': {
+        const stepName = event.stepName ?? null;
+        // A step that is not a roster speaker is informative-only.
+        if (!this._isRosterStep(stepName)) return null;
+        run.step = stepName;
+        if (this.onStepStarted) this.onStepStarted(stepName, run.runId);
         return null;
-      case 'STEP_FINISHED':
-        if (this.onStepFinished) this.onStepFinished(event.stepName ?? null);
-        if (this._currentStep === event.stepName) this._currentStep = null;
+      }
+      case 'STEP_FINISHED': {
+        const stepName = event.stepName ?? null;
+        if (!this._isRosterStep(stepName)) return null;
+        if (run.step === stepName) run.step = null;
+        if (this.onStepFinished) this.onStepFinished(stepName, run.runId);
         return null;
+      }
       case 'CUSTOM':
-        if (this.onCustomEvent) this.onCustomEvent(event.name, event.value);
+        if (this.onCustomEvent) this.onCustomEvent(event.name, event.value, run.runId);
         return null;
 
       default:

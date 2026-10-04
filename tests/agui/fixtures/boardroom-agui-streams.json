@@ -1,0 +1,56 @@
+{
+  "_comment": "Recorded POST /ag-ui streams of the Boardroom backend (ASISaga/boardroom, boardroom_function/agui_surface.py + agui_mapping.py; spec 07 Evt-to-AG-UI table). \"{{threadId}}\" and \"{{runId}}\" are replaced with the ids of the request the client sent.",
+  "turn_complete": [
+    { "type": "RUN_STARTED", "threadId": "{{threadId}}", "runId": "{{runId}}" },
+    { "type": "STEP_STARTED", "stepName": "cfo" },
+    { "type": "TEXT_MESSAGE_START", "messageId": "t1:cfo", "role": "assistant" },
+    { "type": "TEXT_MESSAGE_CONTENT", "messageId": "t1:cfo", "delta": "Runway is " },
+    { "type": "TEXT_MESSAGE_CONTENT", "messageId": "t1:cfo", "delta": "four months." },
+    { "type": "TEXT_MESSAGE_END", "messageId": "t1:cfo" },
+    { "type": "STEP_FINISHED", "stepName": "cfo" },
+    { "type": "CUSTOM", "name": "position_stated", "value": { "actor": "cfo", "position": "support", "summary": "extend runway" } },
+    { "type": "CUSTOM", "name": "resolution", "value": { "turn_id": "t1", "decision": "hold the price" } },
+    { "type": "RUN_FINISHED", "threadId": "{{threadId}}", "runId": "{{runId}}", "result": { "turn_id": "t1", "decision": "hold the price" } }
+  ],
+  "turn_complete_two_speakers": [
+    { "type": "RUN_STARTED", "threadId": "{{threadId}}", "runId": "{{runId}}" },
+    { "type": "STEP_STARTED", "stepName": "founder" },
+    { "type": "TEXT_MESSAGE_START", "messageId": "t2:founder", "role": "assistant" },
+    { "type": "TEXT_MESSAGE_CONTENT", "messageId": "t2:founder", "delta": "CFO, the runway?" },
+    { "type": "TEXT_MESSAGE_END", "messageId": "t2:founder" },
+    { "type": "STEP_FINISHED", "stepName": "founder" },
+    { "type": "STEP_STARTED", "stepName": "cfo" },
+    { "type": "TEXT_MESSAGE_START", "messageId": "t2:cfo", "role": "assistant" },
+    { "type": "TEXT_MESSAGE_CONTENT", "messageId": "t2:cfo", "delta": "Four months." },
+    { "type": "TEXT_MESSAGE_END", "messageId": "t2:cfo" },
+    { "type": "STEP_FINISHED", "stepName": "cfo" },
+    { "type": "CUSTOM", "name": "resolution", "value": { "turn_id": "t2", "decision": "extend runway" } },
+    { "type": "RUN_FINISHED", "threadId": "{{threadId}}", "runId": "{{runId}}", "result": { "turn_id": "t2", "decision": "extend runway" } }
+  ],
+  "turn_cancelled": [
+    { "type": "RUN_STARTED", "threadId": "{{threadId}}", "runId": "{{runId}}" },
+    { "type": "STEP_STARTED", "stepName": "cfo" },
+    { "type": "TEXT_MESSAGE_START", "messageId": "t3:cfo", "role": "assistant" },
+    { "type": "TEXT_MESSAGE_CONTENT", "messageId": "t3:cfo", "delta": "Runway is " },
+    { "type": "TEXT_MESSAGE_END", "messageId": "t3:cfo" },
+    { "type": "STEP_FINISHED", "stepName": "cfo" },
+    { "type": "RUN_FINISHED", "threadId": "{{threadId}}", "runId": "{{runId}}", "result": { "cancelled": true } }
+  ],
+  "turn_failed": [
+    { "type": "RUN_STARTED", "threadId": "{{threadId}}", "runId": "{{runId}}" },
+    { "type": "STEP_STARTED", "stepName": "cfo" },
+    { "type": "TEXT_MESSAGE_START", "messageId": "t4:cfo", "role": "assistant" },
+    { "type": "TEXT_MESSAGE_CONTENT", "messageId": "t4:cfo", "delta": "Runway is " },
+    { "type": "RUN_ERROR", "message": "O timed out", "code": "TurnFailed" }
+  ],
+  "sanitization_rejected": [
+    { "type": "RUN_STARTED", "threadId": "{{threadId}}", "runId": "{{runId}}" },
+    { "type": "RUN_ERROR", "message": "unsupported content on the user leg", "code": "SanitizationRejected" }
+  ],
+  "hydrate": [
+    { "type": "RUN_STARTED", "threadId": "{{threadId}}", "runId": "{{runId}}" },
+    { "type": "STATE_SNAPSHOT", "snapshot": { "since_you_were_away": 1 } },
+    { "type": "MESSAGES_SNAPSHOT", "messages": [ { "id": "t0", "role": "assistant", "content": "prior decision" } ] },
+    { "type": "RUN_FINISHED", "threadId": "{{threadId}}", "runId": "{{runId}}" }
+  ]
+}
