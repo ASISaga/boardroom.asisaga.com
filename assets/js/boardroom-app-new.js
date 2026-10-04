@@ -151,10 +151,23 @@ const INTERJECTION_STATUS_TIMEOUT_MS = 90 * 1000;
 // placeholder is sent until the hydrate's RUN_STARTED reveals it.
 const PENDING_THREAD_ID = 'boardroom:pending';
 
-// 403 detail for a tenant with no active registry entry:
+// Legacy 403 detail for a tenant with no active registry entry:
 // "this organization is not registered for Boardroom (error_id <32-hex>)".
+// Fallback only, for a backend that predates the structured error body
+// (`code: 'tenant_not_registered'`, `error_id`).
 const UNREGISTERED_ORG_PATTERN = /not registered for Boardroom/i;
 const ERROR_ID_PATTERN = /error_id\s+([0-9a-f]{32})/i;
+
+// `sign_in` codes a fresh token cannot fix: the token is for another API or
+// authority (usually a wrong MSAL_API_SCOPES / authority), so a redirect
+// would only be rejected the same way. Shown as a configuration error.
+const CONFIG_SIGN_IN_CODES = new Set(['audience_mismatch', 'issuer_mismatch']);
+
+// Row labels for GET /auth/status `checks[].id` (role checks are `role:<name>`).
+const AUTH_CHECK_LABELS = {
+    token: 'Sign-in token accepted',
+    tenant_registered: 'Organization registered for Boardroom',
+};
 
 class BoardroomApp extends ChatroomApp {
     constructor() {
@@ -186,6 +199,13 @@ class BoardroomApp extends ChatroomApp {
         // needs to process any redirect response before anything else runs).
         this.msalClient = null;
         this.msalAccount = null;
+
+        // Last GET /auth/status body (display/diagnostics only: tenant_id and
+        // company_id are never sent back to the backend, INV-5) and the
+        // capabilities it grants. Admin controls stay hidden until
+        // `administer` is true.
+        this.authStatus = null;
+        this.capabilities = { participate: false, administer: false };
     }
 
     // ── Auth: Entra / MSAL ───────────────────────────────────────────────
@@ -314,6 +334,7 @@ class BoardroomApp extends ChatroomApp {
             console.warn('[Boardroom] Could not persist draft message before redirect:', err);
         }
 
+        this._redirecting = true;
         await this.msalClient.loginRedirect({ scopes: MSAL_API_SCOPES });
         // loginRedirect() navigates away; execution does not continue past
         // this point on success.
@@ -622,6 +643,7 @@ class BoardroomApp extends ChatroomApp {
 
     async initializeBoardroom() {
         this._initCopilotKit();
+        this._applyCapabilities(null);
 
         if (this.boardroomConfig.showAgentProfiles) {
             await this.loadAgents();
@@ -629,17 +651,310 @@ class BoardroomApp extends ChatroomApp {
 
         this.attachBoardroomEventHandlers();
 
-        if (this.copilotKit) {
-            await this._hydrateBoardroom();
+        await this._startSession();
+    }
+
+    /**
+     * Check the backend's sign-in checklist, then hydrate. When the user
+     * cannot use the boardroom yet, the checklist replaces the chat and
+     * nothing is hydrated. Re-run by the checklist's Retry button.
+     */
+    async _startSession() {
+        if (!this.copilotKit) return;
+        if (!(await this._checkAuthStatus())) return;
+
+        await this._hydrateBoardroom();
+        if (!this._onVisibility) {
             this._onVisibility = () => {
                 if (document.visibilityState === 'visible') this._hydrateBoardroom();
             };
             document.addEventListener('visibilitychange', this._onVisibility);
-            if (!this._onPageHide) {
-                // Unload aborts every in-flight run (sends and hydrates).
-                this._onPageHide = () => this.copilotKit?.abort();
-                window.addEventListener('pagehide', this._onPageHide);
+        }
+        if (!this._onPageHide) {
+            // Unload aborts every in-flight run (sends and hydrates).
+            this._onPageHide = () => this.copilotKit?.abort();
+            window.addEventListener('pagehide', this._onPageHide);
+        }
+    }
+
+    // ── Sign-in checklist (GET {api}/auth/status) ──────────────────────
+
+    /**
+     * True when the boardroom may start: F reports `ready`, or F predates
+     * /auth/status (then the hydrate's own errors decide, as before).
+     * Otherwise the checklist is shown, or a sign-in redirect is under way.
+     */
+    async _checkAuthStatus() {
+        const status = await this._fetchAuthStatus();
+        if (!status) return !this._redirecting;
+        return this._applyAuthStatus(status);
+    }
+
+    /**
+     * @returns {Promise<object|null>} The /auth/status body; a status built
+     *   from F's structured error (500 server_misconfigured); or null when
+     *   the endpoint is unavailable (older F, network failure).
+     */
+    async _fetchAuthStatus() {
+        if (!this.copilotKit || this._redirecting) return null;
+        try {
+            return await this.copilotKit.fetchAuthStatus();
+        } catch (error) {
+            if (this._redirecting) return null;
+            if (error?.code && error?.action) {
+                return {
+                    ready: false,
+                    code: error.code,
+                    action: error.action,
+                    detail: error.detail ?? null,
+                    error_id: error.errorId ?? null,
+                    checks: [],
+                };
             }
+            console.warn('[Boardroom] Sign-in checklist unavailable (GET /auth/status):', error);
+            return null;
+        }
+    }
+
+    /**
+     * Act on a /auth/status body. `sign_in` re-runs loginRedirect through
+     * the cooldown guard, except for codes a new token cannot fix.
+     * @returns {Promise<boolean>} true when the boardroom may continue.
+     */
+    async _applyAuthStatus(status) {
+        if (this._redirecting) return false;
+        this.authStatus = status;
+        this._applyCapabilities(status.capabilities);
+        if (status.ready === true) {
+            this._clearAuthChecklist();
+            return true;
+        }
+        if (status.action === 'sign_in' && !CONFIG_SIGN_IN_CODES.has(status.code)) {
+            const err = new Error(status.detail || 'Sign-in required');
+            err.status = 401;
+            err.code = status.code;
+            if (await this._handleUnauthorized(err)) return false;
+        }
+        this._renderAuthChecklist(status);
+        return false;
+    }
+
+    /** Show admin-only controls (`[data-boardroom-admin]`) only to administrators. */
+    _applyCapabilities(capabilities) {
+        this.capabilities = {
+            participate: capabilities?.participate === true,
+            administer: capabilities?.administer === true,
+        };
+        this.toggleAttribute('data-can-administer', this.capabilities.administer);
+        this.querySelectorAll('[data-boardroom-admin]').forEach((el) => {
+            el.hidden = !this.capabilities.administer;
+        });
+    }
+
+    _el(tag, className, text) {
+        const el = document.createElement(tag);
+        if (className) el.className = className;
+        if (text != null) el.textContent = text;
+        return el;
+    }
+
+    _button(label, onClick) {
+        const btn = this._el('button', 'boardroom-auth-checklist__btn', label);
+        btn.type = 'button';
+        btn.addEventListener('click', onClick);
+        return btn;
+    }
+
+    async _copyText(text, what) {
+        try {
+            await navigator.clipboard.writeText(text);
+            this.showToast(`${what} copied`, 'success');
+        } catch (err) {
+            console.warn('[Boardroom] Copy failed:', err);
+            this.showToast(`Could not copy ${what.toLowerCase()}`, 'error');
+        }
+    }
+
+    _checkLabel(id) {
+        const key = String(id || '');
+        if (key in AUTH_CHECK_LABELS) return AUTH_CHECK_LABELS[key];
+        if (key.startsWith('role:')) return `Role "${key.slice(5)}" assigned`;
+        return key;
+    }
+
+    /** The App Role the user must be given (from the failing role check). */
+    _requiredRole(status) {
+        const failed = (status.checks || []).find((c) => c?.ok === false && c.required_role
+            && (!status.code || c.code === status.code));
+        return failed?.required_role || status.required_role || status.required_roles?.participate || 'participant';
+    }
+
+    /** Admin-consent link, only when it is an https Entra URL. */
+    _safeConsentUrl(url) {
+        try {
+            const parsed = new URL(String(url));
+            return parsed.protocol === 'https:' && parsed.hostname === 'login.microsoftonline.com' ? parsed.href : null;
+        } catch (_) {
+            return null;
+        }
+    }
+
+    /** Per-`action` guidance naming who has to act, plus its buttons. */
+    _authGuidance(status) {
+        const nodes = [];
+        const buttons = [];
+        const tenant = status.tenant_id || 'unknown';
+        const reference = status.error_id ? ` (reference ${status.error_id})` : '';
+        const appClientId = status.onboarding?.app_client_id || MSAL_CONFIG.auth.clientId;
+        const p = (text) => nodes.push(this._el('p', 'boardroom-auth-checklist__guidance', text));
+
+        switch (status.action) {
+            case 'request_onboarding': {
+                p(`Your organization (tenant ${tenant}) is not set up for Boardroom. ` +
+                    `Ask Boardroom support to onboard it, quoting tenant ${tenant}` +
+                    (status.error_id ? ` and reference ${status.error_id}.` : '.'));
+                const consentUrl = this._safeConsentUrl(status.onboarding?.admin_consent_url);
+                if (consentUrl) {
+                    const para = this._el('p', 'boardroom-auth-checklist__guidance',
+                        'Your organization’s Entra admin grants consent for Boardroom here: ');
+                    const link = this._el('a', null, 'Grant admin consent');
+                    link.href = consentUrl;
+                    link.target = '_blank';
+                    link.rel = 'noopener noreferrer';
+                    para.appendChild(link);
+                    nodes.push(para);
+                }
+                p(`Boardroom Enterprise application (client ID): ${appClientId}`);
+                break;
+            }
+            case 'request_role':
+                p(`Ask your organization’s Entra admin to assign you the “${this._requiredRole(status)}” ` +
+                    `role on the Boardroom Enterprise application (client ID ${appClientId}). ` +
+                    'Roles appear only in a newly issued token, so sign out and sign in again afterwards.');
+                buttons.push(this._button('Sign out and sign in again', () => this._signOutAndIn()));
+                break;
+            case 'sign_in':
+                if (CONFIG_SIGN_IN_CODES.has(status.code)) {
+                    p(`Boardroom sign-in is misconfigured (${status.code}): the token is issued for a different ` +
+                        `API or authority, so signing in again will not help. Contact Boardroom support${reference}.`);
+                } else {
+                    p(`Your sign-in was not accepted${status.code ? ` (${status.code})` : ''}. Please sign in again.`);
+                    buttons.push(this._button('Sign in again', () => {
+                        this._clearAuthRedirectGuard();
+                        this._redirectToLogin();
+                    }));
+                }
+                break;
+            case 'retry':
+                p(`Boardroom is temporarily unavailable: ${status.detail || status.code || 'please retry'}${reference}.`);
+                buttons.push(this._button('Retry', () => this._startSession()));
+                break;
+            case 'contact_support':
+                p(`Boardroom could not complete sign-in: ${status.detail || status.code || 'unknown error'}. ` +
+                    `Contact Boardroom support${reference}.`);
+                break;
+            default:
+                if (status.detail) p(`${status.detail}${reference}`);
+        }
+        return { nodes, buttons };
+    }
+
+    /**
+     * Replace the chat with F's sign-in checklist: who is signed in, one row
+     * per check, and what to do next. Built with DOM APIs (textContent only).
+     */
+    _renderAuthChecklist(status) {
+        this._clearAuthChecklist();
+        this._authBlocked = true;
+
+        const panel = this._el('section', 'boardroom-auth-checklist');
+        panel.setAttribute('role', 'region');
+        panel.setAttribute('aria-labelledby', 'boardroomAuthChecklistTitle');
+        const title = this._el('h2', 'boardroom-auth-checklist__title', 'Boardroom sign-in checklist');
+        title.id = 'boardroomAuthChecklistTitle';
+        panel.appendChild(title);
+
+        const user = status.user;
+        if (user && (user.name || user.username)) {
+            const who = user.name && user.username ? `${user.name} (${user.username})` : (user.name || user.username);
+            panel.appendChild(this._el('p', 'boardroom-auth-checklist__identity', `Signed in as ${who}`));
+        }
+        if (status.tenant_id) {
+            const tenant = this._el('p', 'boardroom-auth-checklist__tenant', 'Organization (tenant) ID: ');
+            tenant.appendChild(this._el('code', null, status.tenant_id));
+            tenant.appendChild(document.createTextNode(' '));
+            tenant.appendChild(this._button('Copy tenant ID', () => this._copyText(status.tenant_id, 'Tenant ID')));
+            panel.appendChild(tenant);
+        }
+
+        const checks = Array.isArray(status.checks) ? status.checks : [];
+        if (checks.length) {
+            const list = this._el('ul', 'boardroom-auth-checklist__checks');
+            for (const check of checks) {
+                const state = check?.ok === true ? 'ok' : check?.ok === false ? 'failed' : 'unchecked';
+                const item = this._el('li', `boardroom-auth-checklist__check boardroom-auth-checklist__check--${state}`);
+                item.dataset.check = String(check?.id ?? '');
+                item.dataset.state = state;
+                const mark = state === 'ok' ? '✓' : state === 'failed' ? '✗' : '–';
+                const markEl = this._el('span', 'boardroom-auth-checklist__mark', mark);
+                markEl.setAttribute('aria-hidden', 'true');
+                item.appendChild(markEl);
+                const stateText = state === 'ok' ? 'passed' : state === 'failed' ? 'failed' : 'not checked';
+                item.appendChild(document.createTextNode(` ${this._checkLabel(check?.id)} — ${stateText}`));
+                if (state === 'failed' && check.detail) {
+                    item.appendChild(this._el('span', 'boardroom-auth-checklist__detail', `: ${check.detail}`));
+                }
+                list.appendChild(item);
+            }
+            panel.appendChild(list);
+        }
+
+        const { nodes, buttons } = this._authGuidance(status);
+        nodes.forEach((n) => panel.appendChild(n));
+
+        const actions = this._el('div', 'boardroom-auth-checklist__actions');
+        buttons.forEach((b) => actions.appendChild(b));
+        // The status body carries no token: safe to hand to support as-is.
+        actions.appendChild(this._button('Copy diagnostics',
+            () => this._copyText(JSON.stringify(status, null, 2), 'Diagnostics')));
+        panel.appendChild(actions);
+
+        const messagesEl = this.elements?.messagesContainer;
+        if (messagesEl?.parentNode) {
+            messagesEl.parentNode.insertBefore(panel, messagesEl);
+            messagesEl.hidden = true;
+        } else {
+            this.appendChild(panel);
+        }
+        const inputEl = this.querySelector('.chatroom-input');
+        if (inputEl) inputEl.hidden = true;
+        this._authChecklist = panel;
+        this.hideLoading();
+    }
+
+    _clearAuthChecklist() {
+        this._authBlocked = false;
+        if (!this._authChecklist) return;
+        this._authChecklist.remove();
+        this._authChecklist = null;
+        if (this.elements?.messagesContainer) this.elements.messagesContainer.hidden = false;
+        const inputEl = this.querySelector('.chatroom-input');
+        if (inputEl) inputEl.hidden = false;
+    }
+
+    /** Roles appear only in newly issued tokens: sign out, then sign in again. */
+    async _signOutAndIn() {
+        this._clearAuthRedirectGuard();
+        this._redirecting = true;
+        try {
+            await this.msalClient.logoutRedirect({
+                account: this.msalAccount,
+                postLogoutRedirectUri: MSAL_CONFIG.auth.redirectUri,
+            });
+        } catch (err) {
+            this._redirecting = false;
+            console.error('[Boardroom] Sign-out failed:', err);
+            this.showToast('Sign-out failed – please try again', 'error');
         }
     }
 
@@ -825,29 +1140,12 @@ class BoardroomApp extends ChatroomApp {
         console.error('[Boardroom] AG-UI error:', error);
         this._syncRunning();
         this.hideLoading();
-        if (error?.status !== 401 && !UNREGISTERED_ORG_PATTERN.test(error?.detail || '')) {
-            const code = error?.code ? ` [${error.code}]` : '';
-            const status = error?.status ? ` (HTTP ${error.status})` : '';
-            const detail = error?.detail || error?.message || 'Unknown error';
-            const note = this._appendSystemNote('event-error', `[ERROR]${code}${status}: ${detail}`);
-            if (note) {
-                note.dataset.severity = 'error';
-                note.hidden = !this._logAllowed('error');
-            }
-        }
         if (error?.status === 401 || error?.status === 403) {
-            // Token missing/expired, or lacking the `participant` App Role.
-            if (error.status === 401) {
-                this._handleUnauthorized(error);
-                return;
-            }
-            if (UNREGISTERED_ORG_PATTERN.test(error.detail || '')) {
-                this._showUnregisteredOrganization(error.detail);
-                return;
-            }
-            this.showToast('You do not have permission to take part in this boardroom', 'error');
+            // Token, organization or role: F's checklist says which, and who must act.
+            this._onAuthRejected(error);
             return;
         }
+        this._appendErrorNote(error);
         // RUN_ERROR codes from the backend (07 turn_failed / sanitization).
         if (error?.code === 'SanitizationRejected') {
             this.showToast('Your message could not be accepted – please rephrase it and retry', 'error');
@@ -857,10 +1155,78 @@ class BoardroomApp extends ChatroomApp {
             this.showToast('The boardroom turn failed – please try again', 'error');
             return;
         }
+        if (error?.action === 'contact_support') {
+            const reference = error.errorId ? `, quoting reference ${error.errorId}` : '';
+            this.showToast(`Boardroom could not complete the request – contact support${reference}`, 'error');
+            return;
+        }
         this.showToast(
-            error?.status === 502 || error?.status === 503
+            error?.action === 'retry' || error?.status === 502 || error?.status === 503
                 ? 'Boardroom is temporarily unavailable – please retry'
                 : 'AI response error – please try again',
+            'error'
+        );
+    }
+
+    _appendErrorNote(error) {
+        const code = error?.code ? ` [${error.code}]` : '';
+        const status = error?.status ? ` (HTTP ${error.status})` : '';
+        const detail = error?.detail || error?.message || 'Unknown error';
+        const reference = error?.errorId && !detail.includes(error.errorId) ? ` (reference ${error.errorId})` : '';
+        const note = this._appendSystemNote('event-error', `[ERROR]${code}${status}: ${detail}${reference}`);
+        if (note) {
+            note.dataset.severity = 'error';
+            note.hidden = !this._logAllowed('error');
+        }
+    }
+
+    /**
+     * A 401/403 mid-session: re-fetch /auth/status and show the checklist.
+     * Concurrent rejections share one re-check.
+     */
+    _onAuthRejected(error) {
+        if (this._authRecheck) return this._authRecheck;
+        this._authRecheck = (async () => {
+            const status = await this._fetchAuthStatus();
+            if (status) {
+                if (!(await this._applyAuthStatus(status))) return;
+                // Signed in and ready: the rejection is specific to this
+                // request (e.g. company_mismatch, or an admin-only route).
+                this._appendErrorNote(error);
+                this.showToast(
+                    error.code === 'role_missing' && error.requiredRole
+                        ? `This needs the ${error.requiredRole} role – ask your organization’s Entra admin`
+                        : 'You do not have permission for this boardroom action',
+                    'error'
+                );
+                return;
+            }
+            if (!this._redirecting) this._handleLegacyAuthError(error);
+        })().finally(() => { this._authRecheck = null; });
+        return this._authRecheck;
+    }
+
+    /** 401/403 handling when F's /auth/status is unavailable (older F). */
+    _handleLegacyAuthError(error) {
+        if (error.status === 401) {
+            if (CONFIG_SIGN_IN_CODES.has(error.code)) {
+                this._appendErrorNote(error);
+                this.showToast('Boardroom sign-in is misconfigured – contact support', 'error');
+                return;
+            }
+            this._handleUnauthorized(error);
+            return;
+        }
+        if (error.code === 'tenant_not_registered'
+            || (!error.code && UNREGISTERED_ORG_PATTERN.test(error.detail || ''))) {
+            this._showUnregisteredOrganization(error);
+            return;
+        }
+        this._appendErrorNote(error);
+        this.showToast(
+            error.code === 'role_missing' && error.requiredRole
+                ? `Ask your organization’s Entra admin to assign you the ${error.requiredRole} role`
+                : 'You do not have permission to take part in this boardroom',
             'error'
         );
     }
@@ -870,8 +1236,8 @@ class BoardroomApp extends ChatroomApp {
      * Shown as a persistent note so the reference can be quoted; replaced,
      * not duplicated, when a later request is rejected the same way.
      */
-    _showUnregisteredOrganization(detail) {
-        const errorId = ERROR_ID_PATTERN.exec(detail || '')?.[1];
+    _showUnregisteredOrganization(error) {
+        const errorId = error?.errorId || ERROR_ID_PATTERN.exec(error?.detail || '')?.[1];
         const text = 'Your organization is not set up for Boardroom yet. ' +
             (errorId
                 ? `Ask your administrator to contact support, quoting reference ${errorId}.`
@@ -960,7 +1326,7 @@ class BoardroomApp extends ChatroomApp {
      * orchestrator). Autonomous EventGrid/cron turns surface here.
      */
     async _hydrateBoardroom() {
-        if (!this.copilotKit || this.copilotKit.isRunning() || this._hydrating) return;
+        if (!this.copilotKit || this.copilotKit.isRunning() || this._hydrating || this._authBlocked) return;
         this._hydrating = true;
         try {
             await this.copilotKit.hydrate();
@@ -1240,7 +1606,7 @@ class BoardroomApp extends ChatroomApp {
      */
     async _sendViaCopilotKit() {
         const inputEl = this.elements?.inputField;
-        if (!inputEl) return;
+        if (!inputEl || this._authBlocked) return;
 
         const text = inputEl.value.trim();
         if (!text) return;

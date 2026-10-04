@@ -33,9 +33,12 @@ export class CopilotKitClient {
    * @param {string[]} [options.roster]    - Known speaker role ids. When set,
    *   a STEP_STARTED/STEP_FINISHED whose stepName is not in the roster is
    *   informative-only: it is ignored and never rendered as a speaker.
+   * @param {string} [options.authStatusUrl] - Sign-in checklist endpoint
+   *   (default: `/auth/status` next to the runtime's `/ag-ui`).
    */
   constructor(options = {}) {
     this.runtimeUrl = options.runtimeUrl || '/ag-ui';
+    this.authStatusUrl = options.authStatusUrl || CopilotKitClient.authStatusUrlFor(this.runtimeUrl);
     this.threadId = options.threadId || CopilotKitClient.randomUUID();
     this.agentName = options.agentName || null;
     this.extraHeaders = options.headers || {};
@@ -75,7 +78,7 @@ export class CopilotKitClient {
     this.onMessageStart = null;  // (messageId, agentName?, runId) => void
     this.onMessageEnd = null;    // (messageId, fullContent, runId) => void
     this.onRunFinished = null;   // (finalContent, runId) => void  (never after RUN_ERROR)
-    this.onError = null;         // (error, runId?) => void  (error.code from RUN_ERROR)
+    this.onError = null;         // (error, runId?) => void  (error.code from RUN_ERROR or the HTTP error body)
   }
 
   // ── Run classification ─────────────────────────────────────────────────
@@ -150,18 +153,53 @@ export class CopilotKitClient {
   }
 
   /**
-   * Error for a non-2xx response: `status`, plus `detail` when the body is
-   * a JSON `{"detail": "..."}` (e.g. the 403 for an unregistered tenant).
+   * Error for a non-2xx response: `status`, plus the backend's structured
+   * error body when it is JSON: `detail`, `code` (e.g. 'tenant_not_registered'),
+   * `action` (sign_in | request_onboarding | request_role | contact_support |
+   * retry | none), `errorId`, `requiredRole` and `errorType` (the body's
+   * `error`). A 401's RFC 6750 challenge is kept as `wwwAuthenticate`.
    */
   static async _httpError(response, prefix) {
     const errText = await response.text().catch(() => response.statusText);
     const err = new Error(`${prefix} ${response.status}: ${errText}`);
     err.status = response.status;
+    const challenge = response.headers?.get?.('WWW-Authenticate');
+    if (challenge) err.wwwAuthenticate = challenge;
     try {
       const body = JSON.parse(errText);
-      if (body && typeof body.detail === 'string') err.detail = body.detail;
+      if (body && typeof body === 'object') {
+        if (typeof body.detail === 'string') err.detail = body.detail;
+        if (typeof body.code === 'string') err.code = body.code;
+        if (typeof body.action === 'string') err.action = body.action;
+        if (typeof body.error_id === 'string') err.errorId = body.error_id;
+        if (typeof body.required_role === 'string') err.requiredRole = body.required_role;
+        if (typeof body.error === 'string') err.errorType = body.error;
+        err.body = body;
+      }
     } catch (_) { /* not JSON */ }
     return err;
+  }
+
+  /**
+   * GET {api}/auth/status: the backend's sign-in checklist (token, tenant
+   * and each App Role, all checked together). Answers 200 for every auth
+   * outcome; a non-2xx (e.g. 500 server_misconfigured, or 404 from a backend
+   * that predates the endpoint) rejects with the _httpError() shape.
+   * @returns {Promise<object>} The parsed status body.
+   */
+  async fetchAuthStatus() {
+    const headers = await this._buildHeaders({ Accept: 'application/json' });
+    delete headers['Content-Type'];
+    const response = await fetch(this.authStatusUrl, { method: 'GET', headers, cache: 'no-store' });
+    if (!response.ok) {
+      throw await CopilotKitClient._httpError(response, 'Boardroom auth status error');
+    }
+    return response.json();
+  }
+
+  /** `{api}/auth/status`, a sibling of the runtime's `/ag-ui` path. */
+  static authStatusUrlFor(runtimeUrl) {
+    return String(runtimeUrl || '/ag-ui').replace(/\/[^/]*\/?$/, '/auth/status');
   }
 
   // ── UUID helper ──────────────────────────────────────────────────────────
