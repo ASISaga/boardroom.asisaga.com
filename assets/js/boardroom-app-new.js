@@ -66,6 +66,17 @@ import { CopilotKitClient } from '/assets/js/copilotkit-client.js';
 // exact value with whoever owns the backend's app registration ("Expose an
 // API" blade) — using the wrong scope produces a token the backend will
 // reject even though login itself succeeds.
+// MSAL log messages are forwarded to the boardroom chat. MSAL starts logging
+// before the chat DOM exists, so entries queue until a sink is attached.
+const MSAL_LOG_LEVELS = { 0: 'error', 1: 'warning', 2: 'info', 3: 'info', 4: 'info' };
+const msalLogQueue = [];
+let msalLogSink = null;
+function msalLoggerCallback(level, message, containsPii) {
+    if (containsPii || !message) return;
+    const entry = { level: MSAL_LOG_LEVELS[level] || 'info', text: String(message) };
+    if (msalLogSink) msalLogSink(entry); else msalLogQueue.push(entry);
+}
+
 const MSAL_CONFIG = {
     auth: {
         clientId: '09ee9579-46c7-4163-949c-f5f90067a70c',
@@ -80,6 +91,13 @@ const MSAL_CONFIG = {
         // browser tabs/restarts, consistent with how boardroom previously
         // persisted its auth token.
         cacheLocation: 'localStorage',
+    },
+    system: {
+        loggerOptions: {
+            loggerCallback: msalLoggerCallback,
+            piiLoggingEnabled: false,
+            logLevel: 2, // Info
+        },
     },
 };
 
@@ -183,6 +201,7 @@ class BoardroomApp extends ChatroomApp {
             return;
         }
 
+        msalLogSink = (entry) => this._showMsalLog(entry);
         this.msalClient = new msal.PublicClientApplication(MSAL_CONFIG);
         await this.msalClient.initialize();
 
@@ -205,6 +224,19 @@ class BoardroomApp extends ChatroomApp {
         }
 
         this._restoreDraftMessage();
+        this._flushMsalLogs();
+    }
+
+    _showMsalLog({ level, text }) {
+        const note = this._appendSystemNote(`event-${level}`, `[${level.toUpperCase()}] MSAL: ${text}`);
+        if (note) note.dataset.severity = level;
+        return note;
+    }
+
+    _flushMsalLogs() {
+        while (msalLogQueue.length && this.elements?.messagesContainer) {
+            this._showMsalLog(msalLogQueue.shift());
+        }
     }
 
     _isAuthenticated() {
