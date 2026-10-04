@@ -120,6 +120,15 @@ const DRAFT_STORAGE_KEY = 'boardroom_draft_message';
 const AUTH_REDIRECT_STORAGE_KEY = 'boardroom_auth_redirect_at';
 const AUTH_REDIRECT_COOLDOWN_MS = 5 * 60 * 1000;
 
+// Entra's admin-consent endpoint returns to the redirect URI with
+// `?admin_consent=True&tenant=<tid>` (or `error`/`error_description`).
+// Consent only creates the Enterprise application in that tenant; the
+// backend still answers `request_onboarding` until the operator activates
+// the tenant's registry entry. localStorage key prefix, per tenant ID.
+const ADMIN_CONSENT_STORAGE_PREFIX = 'boardroom_admin_consent:';
+const ADMIN_CONSENT_PARAMS = ['admin_consent', 'tenant', 'error', 'error_description', 'error_uri', 'scope'];
+const GUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 // The backend (ASISaga/boardroom, POST /ag-ui) runs ONE perpetual boardroom
 // per company; the Founder and C-suite speak as AG-UI steps
 // (STEP_STARTED.stepName). It exposes no roster REST endpoint, so the members
@@ -619,6 +628,10 @@ class BoardroomApp extends ChatroomApp {
         // only fires after a successful agent selection.
         this.hideLoading();
 
+        // Returning from Entra's admin-consent page: record and report the
+        // outcome, and drop its query parameters from the address bar.
+        this._handleAdminConsentReturn();
+
         // Process any pending MSAL redirect response (or pick up an
         // existing cached session) before deciding whether to require
         // sign-in. Runs after super.connectedCallback() so hydration has
@@ -799,6 +812,66 @@ class BoardroomApp extends ChatroomApp {
         }
     }
 
+    /**
+     * Read Entra's admin-consent response (`?admin_consent=True&tenant=…`,
+     * or `?error=…&error_description=…`) from the URL, remember a grant per
+     * tenant, and strip those parameters. An MSAL response (it carries
+     * `state`/`code`) is left alone for handleRedirectPromise().
+     */
+    _handleAdminConsentReturn() {
+        let url;
+        try {
+            url = new URL(window.location.href);
+        } catch (_) {
+            return;
+        }
+        const q = url.searchParams;
+        const isConsentResponse = q.has('admin_consent')
+            || (q.has('error') && !q.has('state') && !q.has('code'));
+        if (!isConsentResponse) return;
+
+        const tenant = String(q.get('tenant') || '').toLowerCase();
+        const granted = String(q.get('admin_consent') || '').toLowerCase() === 'true' && !q.has('error');
+        this._adminConsentReturn = {
+            granted,
+            at: new Date().toISOString(),
+            tenant: GUID_PATTERN.test(tenant) ? tenant : null,
+            error: granted ? null : String(q.get('error') || 'consent_not_granted').slice(0, 100),
+            errorDescription: granted ? null : String(q.get('error_description') || '').slice(0, 500),
+        };
+        if (granted && this._adminConsentReturn.tenant) {
+            try {
+                localStorage.setItem(ADMIN_CONSENT_STORAGE_PREFIX + this._adminConsentReturn.tenant,
+                    this._adminConsentReturn.at);
+            } catch (_) { /* storage unavailable */ }
+        }
+
+        ADMIN_CONSENT_PARAMS.forEach((name) => q.delete(name));
+        try {
+            window.history.replaceState(window.history.state, '', url.pathname + url.search + url.hash);
+        } catch (_) { /* ignore */ }
+
+        if (granted) {
+            this.showToast('Admin consent granted. Boardroom support must now activate your organization.', 'success');
+        } else {
+            this.showToast('Admin consent was not granted', 'error');
+        }
+    }
+
+    /** ISO time admin consent was granted for `tenantId` from this browser, or null. */
+    _adminConsentGrantedAt(tenantId) {
+        const tenant = String(tenantId || '').toLowerCase();
+        if (!GUID_PATTERN.test(tenant)) return null;
+        if (this._adminConsentReturn?.granted && this._adminConsentReturn.tenant === tenant) {
+            return this._adminConsentReturn.at;
+        }
+        try {
+            return localStorage.getItem(ADMIN_CONSENT_STORAGE_PREFIX + tenant);
+        } catch (_) {
+            return null;
+        }
+    }
+
     /** Per-`action` guidance naming who has to act, plus its buttons. */
     _authGuidance(status) {
         const nodes = [];
@@ -810,14 +883,34 @@ class BoardroomApp extends ChatroomApp {
 
         switch (status.action) {
             case 'request_onboarding': {
-                p(`Your organization (tenant ${tenant}) is not set up for Boardroom. ` +
-                    `Ask Boardroom support to onboard it, quoting tenant ${tenant}` +
-                    (status.error_id ? ` and reference ${status.error_id}.` : '.'));
+                // Admin consent (Entra) and activation (Boardroom's registry)
+                // are separate steps: consent alone never makes this `ready`.
+                const consentedAt = this._adminConsentGrantedAt(status.tenant_id);
+                const consentReturn = this._adminConsentReturn;
+                if (consentReturn && !consentReturn.granted) {
+                    p(`Admin consent was not granted (${consentReturn.error})` +
+                        (consentReturn.errorDescription ? `: ${consentReturn.errorDescription}` : '.'));
+                }
+                if (consentedAt) {
+                    const when = new Date(consentedAt);
+                    p(`Admin consent for Boardroom was granted for tenant ${tenant}` +
+                        (Number.isNaN(when.getTime()) ? '' : ` (${when.toLocaleString()})`) + '. That step is done.');
+                    p(`Remaining step: Boardroom support must register and activate your organization ` +
+                        `(tenant ${tenant}). Ask Boardroom support to activate it` +
+                        (status.error_id ? `, quoting reference ${status.error_id}` : '') +
+                        ', then select Check again.');
+                } else {
+                    p(`Your organization (tenant ${tenant}) is not set up for Boardroom. ` +
+                        `Ask Boardroom support to onboard it, quoting tenant ${tenant}` +
+                        (status.error_id ? ` and reference ${status.error_id}.` : '.'));
+                }
                 const consentUrl = this._safeConsentUrl(status.onboarding?.admin_consent_url);
                 if (consentUrl) {
-                    const para = this._el('p', 'boardroom-auth-checklist__guidance',
-                        'Your organization’s Entra admin grants consent for Boardroom here: ');
-                    const link = this._el('a', null, 'Grant admin consent');
+                    const para = this._el('p', 'boardroom-auth-checklist__guidance', consentedAt
+                        ? 'Consent does not need to be granted again. To repeat it anyway: '
+                        : 'Your organization’s Entra admin grants consent for Boardroom here ' +
+                          '(this does not activate Boardroom; Boardroom support does that): ');
+                    const link = this._el('a', null, consentedAt ? 'Grant admin consent again' : 'Grant admin consent');
                     link.href = consentUrl;
                     link.target = '_blank';
                     link.rel = 'noopener noreferrer';
@@ -825,6 +918,7 @@ class BoardroomApp extends ChatroomApp {
                     nodes.push(para);
                 }
                 p(`Boardroom Enterprise application (client ID): ${appClientId}`);
+                buttons.push(this._button('Check again', () => this._startSession()));
                 break;
             }
             case 'request_role':
