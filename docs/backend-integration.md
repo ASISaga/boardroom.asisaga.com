@@ -374,7 +374,16 @@ After MSAL sign-in, and before the hydrate, `boardroom-app-new.js` calls
   (with a copy button), guidance for the `action`, and a **Copy diagnostics**
   button. The guidance names who has to act:
   - `request_onboarding`: Boardroom support onboards the tenant. The page also
-    shows the admin-consent link and the app client ID.
+    shows the admin-consent link, the app client ID, and a **Check again**
+    button. Admin consent only creates the Enterprise application in the
+    customer tenant; `/auth/status` stays `request_onboarding` until the
+    operator activates the tenant's `COMPANY_REGISTRY` entry (backend guide
+    B3–B6). When Entra returns to the page with
+    `?admin_consent=True&tenant=<tid>` (or `error`/`error_description`), the
+    page reports the result, remembers the grant per tenant in localStorage
+    (`boardroom_admin_consent:<tid>`), removes those query parameters, and the
+    checklist then shows consent as done and activation as the remaining step
+    ([ASISaga/boardroom#72](https://github.com/ASISaga/boardroom/issues/72)).
   - `request_role`: the organization's Entra admin assigns the role. The user
     then signs out and signs in again.
   - `sign_in`: the page signs in again, using the redirect cooldown guard. It
