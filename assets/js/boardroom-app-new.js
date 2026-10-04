@@ -624,6 +624,7 @@ class BoardroomApp extends ChatroomApp {
                 this._setActiveSpeaker(null);
             }
         };
+        this.copilotKit.onProtocolEvent = (event) => this._showProtocolEvent(event);
         this.copilotKit.onCustomEvent = (name, value) => this._handleBoardroomEvent(name, value);
         this.copilotKit.onStateChange = (state) => {
             const away = Number(state?.since_you_were_away || 0);
@@ -740,7 +741,7 @@ class BoardroomApp extends ChatroomApp {
             const code = error?.code ? ` [${error.code}]` : '';
             const status = error?.status ? ` (HTTP ${error.status})` : '';
             const detail = error?.detail || error?.message || 'Unknown error';
-            this._appendSystemNote('error', `Error${code}${status}: ${detail}`);
+            this._appendSystemNote('event-error', `[ERROR]${code}${status}: ${detail}`);
         }
         if (error?.status === 401 || error?.status === 403) {
             // Token missing/expired, or lacking the `participant` App Role.
@@ -806,6 +807,45 @@ class BoardroomApp extends ChatroomApp {
             bubbles: true,
             detail: { name, value, conversationId: this.conversationId },
         }));
+    }
+
+    /**
+     * Classify an AG-UI event as a severity: error | warning | success | info.
+     * Returns null for events already rendered elsewhere (text bubbles,
+     * RUN_ERROR via _handleRunError, boardroom CUSTOM events) or pure noise.
+     */
+    _classifyProtocolEvent(event) {
+        const type = String(event?.type || '');
+        switch (type) {
+            case 'RUN_STARTED': return { level: 'info', text: 'Run started' };
+            case 'RUN_FINISHED':
+                return event.result?.cancelled === true
+                    ? { level: 'warning', text: 'Run cancelled' }
+                    : { level: 'success', text: 'Run finished' };
+            case 'STEP_STARTED': return { level: 'info', text: `Step started: ${event.stepName ?? ''}` };
+            case 'STEP_FINISHED': return { level: 'info', text: `Step finished: ${event.stepName ?? ''}` };
+            case 'TOOL_CALL_START': return { level: 'info', text: `Tool call: ${event.toolCallName ?? event.name ?? ''}` };
+            case 'TOOL_CALL_RESULT': return { level: 'success', text: 'Tool call completed' };
+            case 'STATE_SNAPSHOT': return { level: 'info', text: 'State snapshot received' };
+            case 'STATE_DELTA': return { level: 'info', text: 'State updated' };
+            case 'MESSAGES_SNAPSHOT': return { level: 'info', text: 'Message history synced' };
+            case 'RAW': return { level: 'info', text: 'Raw event received' };
+            default: return null;
+        }
+    }
+
+    _showProtocolEvent(event) {
+        const type = String(event?.type || '');
+        let c = this._classifyProtocolEvent(event);
+        if (!c && type === 'CUSTOM') {
+            const name = String(event.name || '');
+            if (/(error|fail)/i.test(name)) c = { level: 'error', text: `${name}: ${typeof event.value === 'string' ? event.value : JSON.stringify(event.value ?? '')}` };
+            else if (/(warn|conflict)/i.test(name)) c = { level: 'warning', text: `${name}: ${typeof event.value === 'string' ? event.value : JSON.stringify(event.value ?? '')}` };
+            else if (!['position_stated', 'resolution'].includes(name)) c = { level: 'info', text: `Event: ${name}` };
+        }
+        if (!c) return;
+        const note = this._appendSystemNote(`event-${c.level}`, `[${c.level.toUpperCase()}] ${c.text}`);
+        if (note) note.dataset.severity = c.level;
     }
 
     _appendSystemNote(kind, text) {
