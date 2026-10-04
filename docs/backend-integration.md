@@ -363,6 +363,33 @@ function authHeader() {
 }
 ```
 
+### Boardroom sign-in checklist
+
+After MSAL sign-in, and before the hydrate, `boardroom-app-new.js` calls
+`GET {api}/auth/status` with the same bearer token as `/ag-ui`:
+
+- `ready: true`: the boardroom hydrates as usual.
+- `ready: false`: the chat is replaced by a checklist. It shows one row per
+  `checks[]` entry (✓, ✗ or "not checked"), the signed-in user and tenant ID
+  (with a copy button), guidance for the `action`, and a **Copy diagnostics**
+  button. The guidance names who has to act:
+  - `request_onboarding`: Boardroom support onboards the tenant. The page also
+    shows the admin-consent link and the app client ID.
+  - `request_role`: the organization's Entra admin assigns the role. The user
+    then signs out and signs in again.
+  - `sign_in`: the page signs in again, using the redirect cooldown guard. It
+    shows a configuration error instead for `audience_mismatch` and
+    `issuer_mismatch`.
+  - `retry`: the page offers a Retry button.
+  - `contact_support`: the page shows the detail and the `error_id`.
+- A 401 or 403 from `/ag-ui` mid-session re-fetches `/auth/status`. Error
+  bodies are read by `code`, `action`, `error_id` and `required_role`. The
+  regex on `detail` is used only when an older backend has no `/auth/status`.
+- Admin controls (`[data-boardroom-admin]`) are shown only when
+  `capabilities.administer` is `true`.
+- `tenant_id` and `company_id` are only displayed. The page never sends them to
+  the backend (INV-5).
+
 ## Rate Limiting
 
 - **Global**: 1000 requests/hour per user

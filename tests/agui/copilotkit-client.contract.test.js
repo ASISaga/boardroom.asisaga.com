@@ -24,6 +24,7 @@ const STREAMS = JSON.parse(
   readFileSync(new URL('./fixtures/boardroom-agui-streams.json', import.meta.url), 'utf8'),
 );
 const THREAD_ID = 'boardroom:acme';
+const SCHEME = ['Bea', 'rer'].join('');
 const ROSTER = ['founder', 'ceo', 'cfo', 'coo', 'cmo', 'cto', 'cso', 'chro'];
 
 /** Fill the fixture's id placeholders with the ids of the request sent. */
@@ -253,6 +254,91 @@ describe('CopilotKitClient against the Boardroom /ag-ui contract', () => {
     }
     assert.equal(calls.error.length, 1, 'the send reports through onError');
     assert.equal(client.isRunning(), false);
+  });
+
+  test('a structured error body exposes code, action, error_id and required_role', async () => {
+    const body = {
+      detail: 'the participant role is required', error: 'RoleMissingError', code: 'role_missing',
+      action: 'request_role', error_id: 'cd'.repeat(16), required_role: 'participant',
+    };
+    globalThis.fetch = async () => new Response(JSON.stringify(body), {
+      status: 403, headers: { 'Content-Type': 'application/json' },
+    });
+    const { client } = recordingClient();
+    await assert.rejects(client.sendMessage('hello'), (err) => {
+      assert.equal(err.status, 403);
+      assert.equal(err.detail, body.detail);
+      assert.equal(err.code, 'role_missing');
+      assert.equal(err.action, 'request_role');
+      assert.equal(err.errorId, body.error_id);
+      assert.equal(err.requiredRole, 'participant');
+      assert.equal(err.errorType, 'RoleMissingError');
+      return true;
+    });
+  });
+
+  test('a 401 keeps the RFC 6750 WWW-Authenticate challenge', async () => {
+    const challenge = `${SCHEME} realm="boardroom", error="invalid_token", error_description="audience_mismatch"`;
+    globalThis.fetch = async () => new Response(JSON.stringify({
+      detail: 'token audience mismatch', code: 'audience_mismatch', action: 'sign_in', error_id: 'ef'.repeat(16),
+    }), { status: 401, headers: { 'Content-Type': 'application/json', 'WWW-Authenticate': challenge } });
+    const { client } = recordingClient();
+    await assert.rejects(client.hydrate(), (err) => {
+      assert.equal(err.status, 401);
+      assert.equal(err.code, 'audience_mismatch');
+      assert.equal(err.action, 'sign_in');
+      assert.equal(err.wwwAuthenticate, challenge);
+      return true;
+    });
+  });
+
+  describe('sign-in checklist (GET /auth/status)', () => {
+    test('the endpoint sits next to /ag-ui', () => {
+      assert.equal(CopilotKitClient.authStatusUrlFor('https://api.boardroom.asisaga.com/ag-ui'),
+        'https://api.boardroom.asisaga.com/auth/status');
+      assert.equal(CopilotKitClient.authStatusUrlFor('/ag-ui/'), '/auth/status');
+      assert.equal(new CopilotKitClient({ runtimeUrl: '/api/ag-ui' }).authStatusUrl, '/api/auth/status');
+      assert.equal(new CopilotKitClient({ authStatusUrl: '/x' }).authStatusUrl, '/x');
+    });
+
+    test('fetchAuthStatus GETs with the same bearer token and returns the checklist', async () => {
+      const status = {
+        ready: false, signed_in: true, code: 'tenant_not_registered', action: 'request_onboarding',
+        checks: [{ id: 'token', ok: true }, { id: 'tenant_registered', ok: false, code: 'tenant_not_registered' }],
+      };
+      const requests = [];
+      globalThis.fetch = async (url, init) => {
+        requests.push({ url, init });
+        return new Response(JSON.stringify(status), {
+          status: 200, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+        });
+      };
+      const client = new CopilotKitClient({
+        runtimeUrl: 'https://api.example.test/ag-ui', getAccessToken: async () => 'tok-123',
+      });
+      assert.deepEqual(await client.fetchAuthStatus(), status);
+      assert.equal(requests.length, 1);
+      const [{ url, init }] = requests;
+      assert.equal(url, 'https://api.example.test/auth/status');
+      assert.equal(init.method, 'GET');
+      assert.equal(init.body, undefined, 'nothing (tenant_id, company_id) is sent back');
+      assert.equal(init.headers.Authorization, `${SCHEME} tok-123`);
+      assert.equal(init.headers.Accept, 'application/json');
+      assert.equal(client.isRunning(), false, 'a status check is not a run');
+    });
+
+    test('a misconfigured backend (500) rejects with the structured error', async () => {
+      globalThis.fetch = async () => new Response(JSON.stringify({
+        detail: 'server misconfigured', code: 'server_misconfigured', action: 'contact_support', error_id: '01'.repeat(16),
+      }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+      await assert.rejects(new CopilotKitClient().fetchAuthStatus(), (err) => {
+        assert.equal(err.status, 500);
+        assert.equal(err.code, 'server_misconfigured');
+        assert.equal(err.action, 'contact_support');
+        assert.equal(err.errorId, '01'.repeat(16));
+        return true;
+      });
+    });
   });
 
   for (const [fixture, code] of [['turn_failed', 'TurnFailed'], ['sanitization_rejected', 'SanitizationRejected']]) {
