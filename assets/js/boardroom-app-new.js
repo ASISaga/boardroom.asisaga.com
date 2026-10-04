@@ -68,7 +68,12 @@ import { CopilotKitClient } from '/assets/js/copilotkit-client.js';
 // reject even though login itself succeeds.
 // MSAL log messages are forwarded to the boardroom chat. MSAL starts logging
 // before the chat DOM exists, so entries queue until a sink is attached.
-const MSAL_LOG_LEVELS = { 0: 'error', 1: 'warning', 2: 'info', 3: 'info', 4: 'info' };
+const MSAL_LOG_LEVELS = { 0: 'error', 1: 'warning', 2: 'info', 3: 'verbose', 4: 'verbose' };
+// User-selectable chat log level (persisted); a message shows when its rank
+// is <= the selected rank. 'success' ranks with 'info'.
+const LOG_LEVEL_STORAGE_KEY = 'boardroom-log-level';
+const LOG_RANKS = { off: -1, error: 0, warning: 1, success: 2, info: 2, verbose: 3 };
+const LOG_LEVEL_OPTIONS = [['off', 'Off'], ['error', 'Error'], ['warning', 'Warning'], ['info', 'Info'], ['verbose', 'Verbose']];
 const msalLogQueue = [];
 let msalLogSink = null;
 function msalLoggerCallback(level, message, containsPii) {
@@ -96,7 +101,7 @@ const MSAL_CONFIG = {
         loggerOptions: {
             loggerCallback: msalLoggerCallback,
             piiLoggingEnabled: false,
-            logLevel: 2, // Info
+            logLevel: 3, // Verbose; the chat filters by the user-selected level
         },
     },
 };
@@ -227,9 +232,59 @@ class BoardroomApp extends ChatroomApp {
         this._flushMsalLogs();
     }
 
+    _logLevel() {
+        try {
+            const v = localStorage.getItem(LOG_LEVEL_STORAGE_KEY);
+            if (v && v in LOG_RANKS && v !== 'success') return v;
+        } catch (e) { /* storage unavailable */ }
+        return 'info';
+    }
+
+    _logAllowed(level) {
+        return (LOG_RANKS[level] ?? 2) <= LOG_RANKS[this._logLevel()];
+    }
+
+    /** Inject a log-level selector above the chat messages. */
+    _buildLogLevelControl() {
+        const messagesEl = this.elements?.messagesContainer;
+        if (!messagesEl || this._logLevelControl) return;
+        const wrap = document.createElement('div');
+        wrap.className = 'boardroom-log-level';
+        const label = document.createElement('label');
+        label.textContent = 'Log level ';
+        const select = document.createElement('select');
+        select.setAttribute('aria-label', 'Chat log level');
+        const current = this._logLevel();
+        for (const [value, text] of LOG_LEVEL_OPTIONS) {
+            const opt = document.createElement('option');
+            opt.value = value;
+            opt.textContent = text;
+            opt.selected = value === current;
+            select.appendChild(opt);
+        }
+        select.addEventListener('change', () => {
+            try { localStorage.setItem(LOG_LEVEL_STORAGE_KEY, select.value); } catch (e) { /* ignore */ }
+            this._applyLogLevelToExisting();
+        });
+        label.appendChild(select);
+        wrap.appendChild(label);
+        messagesEl.parentNode.insertBefore(wrap, messagesEl);
+        this._logLevelControl = wrap;
+    }
+
+    /** Re-filter notes already in the chat after the level changes. */
+    _applyLogLevelToExisting() {
+        this.elements?.messagesContainer?.querySelectorAll('[data-severity]').forEach((n) => {
+            n.hidden = !this._logAllowed(n.dataset.severity);
+        });
+    }
+
     _showMsalLog({ level, text }) {
         const note = this._appendSystemNote(`event-${level}`, `[${level.toUpperCase()}] MSAL: ${text}`);
-        if (note) note.dataset.severity = level;
+        if (note) {
+            note.dataset.severity = level;
+            note.hidden = !this._logAllowed(level);
+        }
         return note;
     }
 
@@ -535,6 +590,7 @@ class BoardroomApp extends ChatroomApp {
         // Runs the inherited hydration, which calls our _onLayoutBuilt /
         // _onInputBuilt hooks above against the already-static shell.
         await super.connectedCallback();
+        this._buildLogLevelControl();
 
         // Hide the initial loading overlay now that hydration has run —
         // it's no longer tied to a live connection at this stage. Without this,
@@ -773,7 +829,11 @@ class BoardroomApp extends ChatroomApp {
             const code = error?.code ? ` [${error.code}]` : '';
             const status = error?.status ? ` (HTTP ${error.status})` : '';
             const detail = error?.detail || error?.message || 'Unknown error';
-            this._appendSystemNote('event-error', `[ERROR]${code}${status}: ${detail}`);
+            const note = this._appendSystemNote('event-error', `[ERROR]${code}${status}: ${detail}`);
+            if (note) {
+                note.dataset.severity = 'error';
+                note.hidden = !this._logAllowed('error');
+            }
         }
         if (error?.status === 401 || error?.status === 403) {
             // Token missing/expired, or lacking the `participant` App Role.
@@ -877,7 +937,10 @@ class BoardroomApp extends ChatroomApp {
         }
         if (!c) return;
         const note = this._appendSystemNote(`event-${c.level}`, `[${c.level.toUpperCase()}] ${c.text}`);
-        if (note) note.dataset.severity = c.level;
+        if (note) {
+            note.dataset.severity = c.level;
+            note.hidden = !this._logAllowed(c.level);
+        }
     }
 
     _appendSystemNote(kind, text) {
