@@ -100,7 +100,7 @@ function recordingClient() {
     stepStarted: [], stepFinished: [], messageStart: [], messageEnd: [], custom: [],
     snapshot: [], state: [],
   };
-  client.onRunStarted = (runId, threadId) => calls.runStarted.push({ runId, threadId });
+  client.onRunStarted = (runId, threadId, source) => calls.runStarted.push({ runId, threadId, source });
   client.onRunFinished = (content, runId) => calls.runFinished.push({ content, runId });
   client.onRunResult = (result, runId) => calls.runResult.push({ result, runId });
   client.onTurnComplete = (result, runId) => calls.turnComplete.push({ result, runId });
@@ -169,7 +169,7 @@ describe('CopilotKitClient against the Boardroom /ag-ui contract', () => {
     const out = await client.sendMessage('hello board');
     const { runId } = http.requests[0].body;
 
-    assert.deepEqual(calls.runStarted, [{ runId, threadId: THREAD_ID }]);
+    assert.deepEqual(calls.runStarted, [{ runId, threadId: THREAD_ID, source: 'agui' }]);
     assert.deepEqual(calls.stepStarted, [{ speaker: 'cfo', runId }]);
     assert.deepEqual(calls.stepFinished, [{ speaker: 'cfo', runId }]);
     assert.deepEqual(calls.messageStart, [{ messageId: 't1:cfo', speaker: 'cfo', runId }]);
@@ -224,6 +224,35 @@ describe('CopilotKitClient against the Boardroom /ag-ui contract', () => {
     assert.equal(calls.runFinished.length, 1);
     assert.deepEqual(calls.state, [{ since_you_were_away: 1 }]);
     assert.equal(calls.snapshot[0][0].content, 'prior decision');
+  });
+
+  test('the server-minted thread id is reported from the hydrate RUN_STARTED', async () => {
+    const minted = 'boardroom:3f2a9c1e';
+    http = installFetch(() => ({
+      events: STREAMS.hydrate.map((e) => (e.type === 'RUN_STARTED' ? { ...e, threadId: minted } : e)),
+    }));
+    const { client, calls } = recordingClient();
+    client.setThread('boardroom:pending');
+    await client.hydrate();
+    assert.equal(http.requests[0].body.threadId, 'boardroom:pending');
+    assert.deepEqual(calls.runStarted, [{ runId: http.requests[0].body.runId, threadId: minted, source: 'hydrate' }]);
+  });
+
+  test('a 403 for an unregistered organization carries the backend detail', async () => {
+    const detail = `this organization is not registered for Boardroom (error_id ${'ab'.repeat(16)})`;
+    globalThis.fetch = async () => new Response(JSON.stringify({ detail }), {
+      status: 403, headers: { 'Content-Type': 'application/json' },
+    });
+    const { client, calls } = recordingClient();
+    for (const request of [() => client.hydrate(), () => client.sendMessage('hello')]) {
+      await assert.rejects(request(), (err) => {
+        assert.equal(err.status, 403);
+        assert.equal(err.detail, detail);
+        return true;
+      });
+    }
+    assert.equal(calls.error.length, 1, 'the send reports through onError');
+    assert.equal(client.isRunning(), false);
   });
 
   for (const [fixture, code] of [['turn_failed', 'TurnFailed'], ['sanitization_rejected', 'SanitizationRejected']]) {

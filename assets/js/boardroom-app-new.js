@@ -69,7 +69,9 @@ import { CopilotKitClient } from '/assets/js/copilotkit-client.js';
 const MSAL_CONFIG = {
     auth: {
         clientId: '09ee9579-46c7-4163-949c-f5f90067a70c',
-        authority: 'https://login.microsoftonline.com/d1c9a3d1-9701-4605-b5aa-fef9728b0331',
+        // Multi-tenant: any work or school tenant may sign in; the backend
+        // decides (by the token's `tid`) whether the organization is registered.
+        authority: 'https://login.microsoftonline.com/organizations',
         redirectUri: 'https://boardroom.asisaga.com/boardroom/'
     },
     cache: {
@@ -120,6 +122,16 @@ const INTERJECTION_STATUS_AUTONOMOUS =
     'the boardroom is mid-discussion on a scheduled item; your message is queued and will be addressed shortly';
 // Bounded UI timeout for the interjection status (a UI tuning parameter, 07).
 const INTERJECTION_STATUS_TIMEOUT_MS = 90 * 1000;
+
+// The backend mints the boardroom thread id (it replaces the client's
+// threadId and returns the real one in RUN_STARTED.threadId); this
+// placeholder is sent until the hydrate's RUN_STARTED reveals it.
+const PENDING_THREAD_ID = 'boardroom:pending';
+
+// 403 detail for a tenant with no active registry entry:
+// "this organization is not registered for Boardroom (error_id <32-hex>)".
+const UNREGISTERED_ORG_PATTERN = /not registered for Boardroom/i;
+const ERROR_ID_PATTERN = /error_id\s+([0-9a-f]{32})/i;
 
 class BoardroomApp extends ChatroomApp {
     constructor() {
@@ -577,7 +589,10 @@ class BoardroomApp extends ChatroomApp {
             this._clearInterjectionStatusFor(runId);
             this._handleRunError(error);
         };
-        this.copilotKit.onRunStarted = () => this._syncRunning();
+        this.copilotKit.onRunStarted = (runId, threadId, source) => {
+            if (source === 'hydrate') this._adoptThreadId(threadId);
+            this._syncRunning();
+        };
         this.copilotKit.onRunFinished = (content, runId) => {
             this._clearInterjectionStatusFor(runId);
             this._syncRunning();
@@ -625,17 +640,22 @@ class BoardroomApp extends ChatroomApp {
     }
 
     /**
-     * The boardroom is one company-wide room: a single thread
-     * (`boardroom:{company_id}`), not one per selected agent. Tenant scope is
-     * always derived server-side from the token; this id only keys the
-     * AG-UI thread.
+     * The boardroom is one company-wide room: a single thread, not one per
+     * selected agent. The backend resolves the company from the token's
+     * tenant and mints the thread id, so start from a placeholder until the
+     * hydrate's RUN_STARTED carries the real one (see _adoptThreadId).
      */
     _syncCopilotKitThread() {
         if (!this.copilotKit) return;
-        const claims = this.msalAccount?.idTokenClaims || {};
-        const companyId = claims.company_id || claims.extension_company_id || 'default';
-        this.conversationId = `boardroom:${companyId}`;
+        this.conversationId = PENDING_THREAD_ID;
         this.copilotKit.setThread(this.conversationId);
+    }
+
+    /** Adopt the server-minted thread id from a hydrate's RUN_STARTED. */
+    _adoptThreadId(threadId) {
+        if (!this.copilotKit || !threadId || threadId === this.conversationId) return;
+        this.conversationId = threadId;
+        this.copilotKit.setThread(threadId);
     }
 
     _speakerInfo(name) {
@@ -722,6 +742,10 @@ class BoardroomApp extends ChatroomApp {
                 this._handleUnauthorized(error);
                 return;
             }
+            if (UNREGISTERED_ORG_PATTERN.test(error.detail || '')) {
+                this._showUnregisteredOrganization(error.detail);
+                return;
+            }
             this.showToast('You do not have permission to take part in this boardroom', 'error');
             return;
         }
@@ -740,6 +764,22 @@ class BoardroomApp extends ChatroomApp {
                 : 'AI response error – please try again',
             'error'
         );
+    }
+
+    /**
+     * The signed-in tenant has no active Boardroom registry entry (403).
+     * Shown as a persistent note so the reference can be quoted; replaced,
+     * not duplicated, when a later request is rejected the same way.
+     */
+    _showUnregisteredOrganization(detail) {
+        const errorId = ERROR_ID_PATTERN.exec(detail || '')?.[1];
+        const text = 'Your organization is not set up for Boardroom yet. ' +
+            (errorId
+                ? `Ask your administrator to contact support, quoting reference ${errorId}.`
+                : 'Ask your administrator to contact support.');
+        this._unregisteredNote?.remove();
+        this._unregisteredNote = this._appendSystemNote('unregistered-organization', text);
+        this.showToast('Your organization is not set up for Boardroom yet', 'error');
     }
 
     /** Boardroom-level CUSTOM events: position_stated, resolution, state_conflict. */
@@ -787,7 +827,7 @@ class BoardroomApp extends ChatroomApp {
         } catch (error) {
             if (error?.name !== 'AbortError') {
                 console.warn('[Boardroom] Hydrate failed (live-only mode):', error);
-                if (error?.status === 401) this._handleRunError(error);
+                if (error?.status === 401 || error?.status === 403) this._handleRunError(error);
             }
         } finally {
             this._hydrating = false;
