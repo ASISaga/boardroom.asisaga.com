@@ -63,6 +63,7 @@ export class CopilotKitClient {
     // Callbacks. `runId` is the AG-UI run the event belongs to.
     this.onStepStarted = null;   // (speaker, runId) => void
     this.onStepFinished = null;  // (speaker, runId) => void
+    this.onProtocolEvent = null; // (event, runId) => void  (every AG-UI event received)
     this.onCustomEvent = null;   // (name, value, runId) => void
     this.onRunResult = null;     // (result, runId) => void  (any RUN_FINISHED.result, may be undefined)
     this.onTurnComplete = null;  // (digest, runId) => void  (Digest-bearing RUN_FINISHED only)
@@ -373,6 +374,13 @@ export class CopilotKitClient {
       if (run.finished) {
         console.debug('[CopilotKit] Ignoring event after run end:', event.type);
         return;
+      }
+      if (this.onProtocolEvent) {
+        try {
+          this.onProtocolEvent(event, run.runId);
+        } catch (hookError) {
+          console.debug('[CopilotKit] onProtocolEvent failed:', hookError);
+        }
       }
       const chunk = this._processEvent(event, run);
       if (chunk) {

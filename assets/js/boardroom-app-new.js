@@ -66,6 +66,22 @@ import { CopilotKitClient } from '/assets/js/copilotkit-client.js';
 // exact value with whoever owns the backend's app registration ("Expose an
 // API" blade) — using the wrong scope produces a token the backend will
 // reject even though login itself succeeds.
+// MSAL log messages are forwarded to the boardroom chat. MSAL starts logging
+// before the chat DOM exists, so entries queue until a sink is attached.
+const MSAL_LOG_LEVELS = { 0: 'error', 1: 'warning', 2: 'info', 3: 'verbose', 4: 'verbose' };
+// User-selectable chat log level (persisted); a message shows when its rank
+// is <= the selected rank. 'success' ranks with 'info'.
+const LOG_LEVEL_STORAGE_KEY = 'boardroom-log-level';
+const LOG_RANKS = { off: -1, error: 0, warning: 1, success: 2, info: 2, verbose: 3 };
+const LOG_LEVEL_OPTIONS = [['off', 'Off'], ['error', 'Error'], ['warning', 'Warning'], ['info', 'Info'], ['verbose', 'Verbose']];
+const msalLogQueue = [];
+let msalLogSink = null;
+function msalLoggerCallback(level, message, containsPii) {
+    if (containsPii || !message) return;
+    const entry = { level: MSAL_LOG_LEVELS[level] || 'info', text: String(message) };
+    if (msalLogSink) msalLogSink(entry); else msalLogQueue.push(entry);
+}
+
 const MSAL_CONFIG = {
     auth: {
         clientId: '09ee9579-46c7-4163-949c-f5f90067a70c',
@@ -80,6 +96,13 @@ const MSAL_CONFIG = {
         // browser tabs/restarts, consistent with how boardroom previously
         // persisted its auth token.
         cacheLocation: 'localStorage',
+    },
+    system: {
+        loggerOptions: {
+            loggerCallback: msalLoggerCallback,
+            piiLoggingEnabled: false,
+            logLevel: 3, // Verbose; the chat filters by the user-selected level
+        },
     },
 };
 
@@ -183,6 +206,7 @@ class BoardroomApp extends ChatroomApp {
             return;
         }
 
+        msalLogSink = (entry) => this._showMsalLog(entry);
         this.msalClient = new msal.PublicClientApplication(MSAL_CONFIG);
         await this.msalClient.initialize();
 
@@ -205,6 +229,69 @@ class BoardroomApp extends ChatroomApp {
         }
 
         this._restoreDraftMessage();
+        this._flushMsalLogs();
+    }
+
+    _logLevel() {
+        try {
+            const v = localStorage.getItem(LOG_LEVEL_STORAGE_KEY);
+            if (v && v in LOG_RANKS && v !== 'success') return v;
+        } catch (e) { /* storage unavailable */ }
+        return 'info';
+    }
+
+    _logAllowed(level) {
+        return (LOG_RANKS[level] ?? 2) <= LOG_RANKS[this._logLevel()];
+    }
+
+    /** Inject a log-level selector above the chat messages. */
+    _buildLogLevelControl() {
+        const messagesEl = this.elements?.messagesContainer;
+        if (!messagesEl || this._logLevelControl) return;
+        const wrap = document.createElement('div');
+        wrap.className = 'boardroom-log-level';
+        const label = document.createElement('label');
+        label.textContent = 'Log level ';
+        const select = document.createElement('select');
+        select.setAttribute('aria-label', 'Chat log level');
+        const current = this._logLevel();
+        for (const [value, text] of LOG_LEVEL_OPTIONS) {
+            const opt = document.createElement('option');
+            opt.value = value;
+            opt.textContent = text;
+            opt.selected = value === current;
+            select.appendChild(opt);
+        }
+        select.addEventListener('change', () => {
+            try { localStorage.setItem(LOG_LEVEL_STORAGE_KEY, select.value); } catch (e) { /* ignore */ }
+            this._applyLogLevelToExisting();
+        });
+        label.appendChild(select);
+        wrap.appendChild(label);
+        messagesEl.parentNode.insertBefore(wrap, messagesEl);
+        this._logLevelControl = wrap;
+    }
+
+    /** Re-filter notes already in the chat after the level changes. */
+    _applyLogLevelToExisting() {
+        this.elements?.messagesContainer?.querySelectorAll('[data-severity]').forEach((n) => {
+            n.hidden = !this._logAllowed(n.dataset.severity);
+        });
+    }
+
+    _showMsalLog({ level, text }) {
+        const note = this._appendSystemNote(`event-${level}`, `[${level.toUpperCase()}] MSAL: ${text}`);
+        if (note) {
+            note.dataset.severity = level;
+            note.hidden = !this._logAllowed(level);
+        }
+        return note;
+    }
+
+    _flushMsalLogs() {
+        while (msalLogQueue.length && this.elements?.messagesContainer) {
+            this._showMsalLog(msalLogQueue.shift());
+        }
     }
 
     _isAuthenticated() {
@@ -503,6 +590,7 @@ class BoardroomApp extends ChatroomApp {
         // Runs the inherited hydration, which calls our _onLayoutBuilt /
         // _onInputBuilt hooks above against the already-static shell.
         await super.connectedCallback();
+        this._buildLogLevelControl();
 
         // Hide the initial loading overlay now that hydration has run —
         // it's no longer tied to a live connection at this stage. Without this,
@@ -624,6 +712,7 @@ class BoardroomApp extends ChatroomApp {
                 this._setActiveSpeaker(null);
             }
         };
+        this.copilotKit.onProtocolEvent = (event) => this._showProtocolEvent(event);
         this.copilotKit.onCustomEvent = (name, value) => this._handleBoardroomEvent(name, value);
         this.copilotKit.onStateChange = (state) => {
             const away = Number(state?.since_you_were_away || 0);
@@ -736,6 +825,16 @@ class BoardroomApp extends ChatroomApp {
         console.error('[Boardroom] AG-UI error:', error);
         this._syncRunning();
         this.hideLoading();
+        if (error?.status !== 401 && !UNREGISTERED_ORG_PATTERN.test(error?.detail || '')) {
+            const code = error?.code ? ` [${error.code}]` : '';
+            const status = error?.status ? ` (HTTP ${error.status})` : '';
+            const detail = error?.detail || error?.message || 'Unknown error';
+            const note = this._appendSystemNote('event-error', `[ERROR]${code}${status}: ${detail}`);
+            if (note) {
+                note.dataset.severity = 'error';
+                note.hidden = !this._logAllowed('error');
+            }
+        }
         if (error?.status === 401 || error?.status === 403) {
             // Token missing/expired, or lacking the `participant` App Role.
             if (error.status === 401) {
@@ -800,6 +899,48 @@ class BoardroomApp extends ChatroomApp {
             bubbles: true,
             detail: { name, value, conversationId: this.conversationId },
         }));
+    }
+
+    /**
+     * Classify an AG-UI event as a severity: error | warning | success | info.
+     * Returns null for events already rendered elsewhere (text bubbles,
+     * RUN_ERROR via _handleRunError, boardroom CUSTOM events) or pure noise.
+     */
+    _classifyProtocolEvent(event) {
+        const type = String(event?.type || '');
+        switch (type) {
+            case 'RUN_STARTED': return { level: 'info', text: 'Run started' };
+            case 'RUN_FINISHED':
+                return event.result?.cancelled === true
+                    ? { level: 'warning', text: 'Run cancelled' }
+                    : { level: 'success', text: 'Run finished' };
+            case 'STEP_STARTED': return { level: 'info', text: `Step started: ${event.stepName ?? ''}` };
+            case 'STEP_FINISHED': return { level: 'info', text: `Step finished: ${event.stepName ?? ''}` };
+            case 'TOOL_CALL_START': return { level: 'info', text: `Tool call: ${event.toolCallName ?? event.name ?? ''}` };
+            case 'TOOL_CALL_RESULT': return { level: 'success', text: 'Tool call completed' };
+            case 'STATE_SNAPSHOT': return { level: 'info', text: 'State snapshot received' };
+            case 'STATE_DELTA': return { level: 'info', text: 'State updated' };
+            case 'MESSAGES_SNAPSHOT': return { level: 'info', text: 'Message history synced' };
+            case 'RAW': return { level: 'info', text: 'Raw event received' };
+            default: return null;
+        }
+    }
+
+    _showProtocolEvent(event) {
+        const type = String(event?.type || '');
+        let c = this._classifyProtocolEvent(event);
+        if (!c && type === 'CUSTOM') {
+            const name = String(event.name || '');
+            if (/(error|fail)/i.test(name)) c = { level: 'error', text: `${name}: ${typeof event.value === 'string' ? event.value : JSON.stringify(event.value ?? '')}` };
+            else if (/(warn|conflict)/i.test(name)) c = { level: 'warning', text: `${name}: ${typeof event.value === 'string' ? event.value : JSON.stringify(event.value ?? '')}` };
+            else if (!['position_stated', 'resolution'].includes(name)) c = { level: 'info', text: `Event: ${name}` };
+        }
+        if (!c) return;
+        const note = this._appendSystemNote(`event-${c.level}`, `[${c.level.toUpperCase()}] ${c.text}`);
+        if (note) {
+            note.dataset.severity = c.level;
+            note.hidden = !this._logAllowed(c.level);
+        }
     }
 
     _appendSystemNote(kind, text) {
