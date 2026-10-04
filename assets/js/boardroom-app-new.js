@@ -736,6 +736,12 @@ class BoardroomApp extends ChatroomApp {
         console.error('[Boardroom] AG-UI error:', error);
         this._syncRunning();
         this.hideLoading();
+        if (error?.status !== 401 && !UNREGISTERED_ORG_PATTERN.test(error?.detail || '')) {
+            const code = error?.code ? ` [${error.code}]` : '';
+            const status = error?.status ? ` (HTTP ${error.status})` : '';
+            const detail = error?.detail || error?.message || 'Unknown error';
+            this._appendSystemNote('error', `Error${code}${status}: ${detail}`);
+        }
         if (error?.status === 401 || error?.status === 403) {
             // Token missing/expired, or lacking the `participant` App Role.
             if (error.status === 401) {
