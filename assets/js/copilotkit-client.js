@@ -66,7 +66,7 @@ export class CopilotKitClient {
     this.onCustomEvent = null;   // (name, value, runId) => void
     this.onRunResult = null;     // (result, runId) => void  (any RUN_FINISHED.result, may be undefined)
     this.onTurnComplete = null;  // (digest, runId) => void  (Digest-bearing RUN_FINISHED only)
-    this.onRunStarted = null;    // (runId, threadId) => void
+    this.onRunStarted = null;    // (runId, threadId, source) => void  (threadId is server-minted)
     this.onStateChange = null;   // (state) => void
     this.onToolCall = null;      // ({id, name, args, status, result}) => void
     this.onMessagesSnapshot = null; // (messages) => void
@@ -146,6 +146,21 @@ export class CopilotKitClient {
       }
     }
     return headers;
+  }
+
+  /**
+   * Error for a non-2xx response: `status`, plus `detail` when the body is
+   * a JSON `{"detail": "..."}` (e.g. the 403 for an unregistered tenant).
+   */
+  static async _httpError(response, prefix) {
+    const errText = await response.text().catch(() => response.statusText);
+    const err = new Error(`${prefix} ${response.status}: ${errText}`);
+    err.status = response.status;
+    try {
+      const body = JSON.parse(errText);
+      if (body && typeof body.detail === 'string') err.detail = body.detail;
+    } catch (_) { /* not JSON */ }
+    return err;
   }
 
   // ── UUID helper ──────────────────────────────────────────────────────────
@@ -263,10 +278,7 @@ export class CopilotKitClient {
       });
 
       if (!response.ok) {
-        const errText = await response.text().catch(() => response.statusText);
-        const err = new Error(`Boardroom error ${response.status}: ${errText}`);
-        err.status = response.status;
-        throw err;
+        throw await CopilotKitClient._httpError(response, 'Boardroom error');
       }
 
       await this._processSSEStream(response, run);
@@ -316,9 +328,7 @@ export class CopilotKitClient {
         signal: run.controller.signal,
       });
       if (!response.ok) {
-        const err = new Error(`Boardroom hydrate error ${response.status}`);
-        err.status = response.status;
-        throw err;
+        throw await CopilotKitClient._httpError(response, 'Boardroom hydrate error');
       }
       await this._processSSEStream(response, run);
       if (run.error) throw run.error;
@@ -497,7 +507,7 @@ export class CopilotKitClient {
       // ── Run lifecycle ──
       case 'RUN_STARTED':
       case 'RunStarted':
-        if (this.onRunStarted) this.onRunStarted(event.runId ?? run.runId, event.threadId);
+        if (this.onRunStarted) this.onRunStarted(event.runId ?? run.runId, event.threadId, run.source);
         return null;
 
       case 'RUN_FINISHED':
