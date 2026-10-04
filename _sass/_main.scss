@@ -15,7 +15,6 @@
 
 // Chatroom layout - height management and full chatroom-app component styles
 @import "layouts/chatroom";               // .chatroom-layout, .chatroom-header, .chatroom-input, .chatroom-messages
-@import "includes/layouts/chatroom/index"; // Chatroom include partials: toggle strip, members sidebar, header, messages, input
 
 // Components - Semantic mappings to ontological roles
 @import "components/ui-utilities";

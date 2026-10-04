@@ -142,31 +142,6 @@ const ontologyStub = `
     filter: saturate(1.2);
   }
 }
-
-// Theme design tokens used by subdomain partials
-$spacing-xs: 0.25rem;
-$spacing-sm: 0.5rem;
-$spacing-md: 1rem;
-$border-radius-sm: 0.25rem;
-$transition-fast: 0.2s ease;
-$color-boardroom-bg: #111;
-$color-boardroom-muted: #888;
-$color-boardroom-gold-active: rgba(200, 160, 40, 0.18);
-$color-status-success: #2a2;
-
-// Theme structural utility mixins (ontology/engines/utilities)
-@mixin flex-row($gap: null) { display: flex; gap: $gap; }
-@mixin flex-column($gap: null) { display: flex; flex-direction: column; gap: $gap; }
-@mixin flex-center { display: flex; align-items: center; justify-content: center; }
-@mixin flex-shrink-none { flex-shrink: 0; }
-@mixin flex-grow-fill { flex: 1; }
-@mixin size-square($size) { width: $size; height: $size; }
-@mixin border-radius-pill { border-radius: 999px; }
-@mixin border-radius-rounded($radius: 10px) { border-radius: $radius; }
-@mixin cursor-pointer { cursor: pointer; }
-@mixin display-none { display: none; }
-@mixin padding-reset { padding: 0; }
-@mixin truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 `;
 
 fs.writeFileSync(path.join(ontologyDir, 'index.scss'), ontologyStub);
@@ -182,7 +157,6 @@ const themeStubs = {
     'includes/core/_navbar.scss':          '// Stub: navbar (theme)',
     'includes/core/_footer.scss':          '// Stub: footer (theme)',
     'layouts/_chatroom.scss':              '// Stub: chatroom layout (theme)',
-    'includes/layouts/chatroom/_index.scss': '// Stub: chatroom include partials (theme)',
 };
 for (const [relPath, content] of Object.entries(themeStubs)) {
     const stubPath = path.join(tmpDir, relPath);
