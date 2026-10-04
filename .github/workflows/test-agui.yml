@@ -1,0 +1,40 @@
+name: AG-UI Contract Test
+
+on:
+  pull_request:
+    paths:
+      - 'assets/js/copilotkit-client.js'
+      - 'tests/agui/**'
+      - 'package.json'
+      - '.github/workflows/test-agui.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'assets/js/copilotkit-client.js'
+      - 'tests/agui/**'
+      - 'package.json'
+      - '.github/workflows/test-agui.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # package-lock.json is not committed, so `npm ci` is not available.
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Run AG-UI contract test
+        run: npm run test:agui

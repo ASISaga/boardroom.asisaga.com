@@ -113,6 +113,14 @@ const BOARDROOM_ROSTER = [
 // Backend sanitize.MAX_USER_TEXT_CHARS
 const MAX_USER_TEXT_CHARS = 8000;
 
+// 07 "User interjection": status shown when the user sends while a turn is
+// in flight. The in-flight turn keeps streaming; the new message is its own run.
+const INTERJECTION_STATUS_USER = 'boardroom in session — your input will be raised by the chair';
+const INTERJECTION_STATUS_AUTONOMOUS =
+    'the boardroom is mid-discussion on a scheduled item; your message is queued and will be addressed shortly';
+// Bounded UI timeout for the interjection status (a UI tuning parameter, 07).
+const INTERJECTION_STATUS_TIMEOUT_MS = 90 * 1000;
+
 class BoardroomApp extends ChatroomApp {
     constructor() {
         super();
@@ -527,6 +535,11 @@ class BoardroomApp extends ChatroomApp {
                 if (document.visibilityState === 'visible') this._hydrateBoardroom();
             };
             document.addEventListener('visibilitychange', this._onVisibility);
+            if (!this._onPageHide) {
+                // Unload aborts every in-flight run (sends and hydrates).
+                this._onPageHide = () => this.copilotKit?.abort();
+                window.addEventListener('pagehide', this._onPageHide);
+            }
         }
     }
 
@@ -545,34 +558,57 @@ class BoardroomApp extends ChatroomApp {
             // falls back to an interactive redirect if that fails — see
             // its definition above for the full behavior.
             getAccessToken: () => this._acquireToken(),
+            // STEP_STARTED.stepName is the speaker's role id (07); any other
+            // step name is informative-only and never rendered as a speaker.
+            roster: BOARDROOM_ROSTER.map((a) => a.agentId),
         });
 
         this.copilotKit.onStreamChunk = (chunk, messageId) => {
             this._appendStreamChunk(chunk, messageId);
         };
-        this.copilotKit.onMessageStart = (messageId, speaker) => {
+        this.copilotKit.onMessageStart = (messageId, speaker, runId) => {
+            this._clearInterjectionStatusFor(runId);
             this._createStreamingBubble(messageId, speaker);
         };
         this.copilotKit.onMessageEnd = (messageId, fullContent) => {
             this._finalizeStreamingBubble(messageId, fullContent);
         };
-        this.copilotKit.onError = (error) => this._handleRunError(error);
-        this.copilotKit.onRunStarted = () => this._setRunning(true);
-        this.copilotKit.onRunFinished = () => {
-            this._setRunning(false);
-            this._setActiveSpeaker(null);
+        this.copilotKit.onError = (error, runId) => {
+            this._clearInterjectionStatusFor(runId);
+            this._handleRunError(error);
+        };
+        this.copilotKit.onRunStarted = () => this._syncRunning();
+        this.copilotKit.onRunFinished = (content, runId) => {
+            this._clearInterjectionStatusFor(runId);
+            this._syncRunning();
         };
         this.copilotKit.onRunResult = (result) => {
-            if (result && result.cancelled) {
+            if (result && result.cancelled === true) {
                 this.showToast('The boardroom turn was cancelled', 'info');
             }
+        };
+        // Only a Digest-bearing RUN_FINISHED is a completed turn (07);
+        // hydrates and cancelled turns never reach here.
+        this.copilotKit.onTurnComplete = (result, runId) => {
             this.dispatchEvent(new CustomEvent('boardroom-turn-complete', {
                 bubbles: true,
-                detail: { result, conversationId: this.conversationId },
+                detail: {
+                    result,
+                    runId,
+                    lastSeen: this.copilotKit.lastSeen,
+                    conversationId: this.conversationId,
+                },
             }));
         };
-        this.copilotKit.onStepStarted = (speaker) => this._setActiveSpeaker(speaker);
-        this.copilotKit.onStepFinished = () => this._setActiveSpeaker(null);
+        this.copilotKit.onStepStarted = (speaker, runId) => {
+            this._clearInterjectionStatusFor(runId);
+            this._setActiveSpeaker(speaker);
+        };
+        this.copilotKit.onStepFinished = (speaker) => {
+            if (this._activeSpeaker && this._activeSpeaker === String(speaker || '').toLowerCase()) {
+                this._setActiveSpeaker(null);
+            }
+        };
         this.copilotKit.onCustomEvent = (name, value) => this._handleBoardroomEvent(name, value);
         this.copilotKit.onStateChange = (state) => {
             const away = Number(state?.since_you_were_away || 0);
@@ -615,23 +651,70 @@ class BoardroomApp extends ChatroomApp {
         if (input) input.setAttribute('aria-busy', String(running));
     }
 
+    /**
+     * Derive the busy state from the client's in-flight runs (keyed per
+     * runId), so one run ending does not mark a concurrent run as idle.
+     */
+    _syncRunning() {
+        const running = !!this.copilotKit?.isRunning();
+        this._setRunning(running);
+        if (!running) this._setActiveSpeaker(null);
+    }
+
     /** Mark the deliberating C-suite member in the members sidebar. */
     _setActiveSpeaker(speaker) {
+        const key = String(speaker || '').toLowerCase();
+        // Presence is keyed on roster role ids only (07).
+        this._activeSpeaker = key && BOARDROOM_ROSTER.some((a) => a.agentId === key) ? key : null;
         const list = this.boardroomElements?.membersList;
         if (!list) return;
-        const key = String(speaker || '').toLowerCase();
         list.querySelectorAll('.chatroom-members-sidebar__item').forEach((item) => {
-            const active = !!key && (item.dataset.agentId === key || item.dataset.name === key);
+            const active = !!this._activeSpeaker && item.dataset.agentId === this._activeSpeaker;
             item.classList.toggle('chatroom-members-sidebar__item--speaking', active);
             if (active) item.setAttribute('aria-current', 'true');
             else item.removeAttribute('aria-current');
         });
     }
 
+    /**
+     * True when a scheduled (source=eventgrid) turn is in flight: either a
+     * run this client is streaming with that source, or the boardroom state
+     * reporting it (`turn_in_flight.source`).
+     */
+    _autonomousTurnInFlight() {
+        const runs = this.copilotKit?.inFlightRuns() || [];
+        if (runs.some((r) => r.source === 'eventgrid')) return true;
+        return this.copilotKit?.state?.turn_in_flight?.source === 'eventgrid';
+    }
+
+    /**
+     * Show 07's interjection status. It clears once a frame of a run that
+     * was not already in flight (the user's own message) arrives, when that
+     * run ends, or after a bounded timeout — whichever comes first.
+     */
+    _showInterjectionStatus(text, inFlightRunIds) {
+        this._clearInterjectionStatus();
+        const note = this._appendSystemNote('interjection', text);
+        const timer = setTimeout(() => this._clearInterjectionStatus(), INTERJECTION_STATUS_TIMEOUT_MS);
+        this._interjection = { note, timer, inFlight: new Set(inFlightRunIds) };
+    }
+
+    _clearInterjectionStatusFor(runId) {
+        if (this._interjection && runId && !this._interjection.inFlight.has(runId)) {
+            this._clearInterjectionStatus();
+        }
+    }
+
+    _clearInterjectionStatus() {
+        if (!this._interjection) return;
+        clearTimeout(this._interjection.timer);
+        this._interjection.note?.remove();
+        this._interjection = null;
+    }
+
     _handleRunError(error) {
         console.error('[Boardroom] AG-UI error:', error);
-        this._setRunning(false);
-        this._setActiveSpeaker(null);
+        this._syncRunning();
         this.hideLoading();
         if (error?.status === 401 || error?.status === 403) {
             // Token missing/expired, or lacking the `participant` App Role.
@@ -640,6 +723,15 @@ class BoardroomApp extends ChatroomApp {
                 return;
             }
             this.showToast('You do not have permission to take part in this boardroom', 'error');
+            return;
+        }
+        // RUN_ERROR codes from the backend (07 turn_failed / sanitization).
+        if (error?.code === 'SanitizationRejected') {
+            this.showToast('Your message could not be accepted – please rephrase it and retry', 'error');
+            return;
+        }
+        if (error?.code === 'TurnFailed') {
+            this.showToast('The boardroom turn failed – please try again', 'error');
             return;
         }
         this.showToast(
@@ -672,13 +764,14 @@ class BoardroomApp extends ChatroomApp {
 
     _appendSystemNote(kind, text) {
         const messagesEl = this.elements?.messagesContainer;
-        if (!messagesEl) return;
+        if (!messagesEl) return null;
         const note = document.createElement('div');
         note.className = `chatroom__message chatroom__message--system boardroom-note boardroom-note--${kind}`;
         note.setAttribute('role', 'status');
         note.textContent = text;
         messagesEl.appendChild(note);
         messagesEl.scrollTop = messagesEl.scrollHeight;
+        return note;
     }
 
     /**
@@ -686,7 +779,7 @@ class BoardroomApp extends ChatroomApp {
      * orchestrator). Autonomous EventGrid/cron turns surface here.
      */
     async _hydrateBoardroom() {
-        if (!this.copilotKit || this._running || this._hydrating) return;
+        if (!this.copilotKit || this.copilotKit.isRunning() || this._hydrating) return;
         this._hydrating = true;
         try {
             await this.copilotKit.hydrate();
@@ -698,7 +791,7 @@ class BoardroomApp extends ChatroomApp {
             }
         } finally {
             this._hydrating = false;
-            this._setRunning(false);
+            this._syncRunning();
         }
     }
 
@@ -959,6 +1052,10 @@ class BoardroomApp extends ChatroomApp {
     /**
      * Send the current input via the CopilotKit runtime (AG-UI HTTP protocol).
      * Renders a user bubble immediately, then streams the AI response token-by-token.
+     *
+     * Sending while a turn is in flight is a 07 user interjection: the new
+     * message is its own AG-UI run, the in-flight turn keeps streaming, and
+     * 07's status text tells the user how the message will be handled.
      */
     async _sendViaCopilotKit() {
         const inputEl = this.elements?.inputField;
@@ -967,10 +1064,6 @@ class BoardroomApp extends ChatroomApp {
         const text = inputEl.value.trim();
         if (!text) return;
 
-        if (this._running) {
-            this.showToast('The board is still deliberating – please wait', 'info');
-            return;
-        }
         if (text.length > MAX_USER_TEXT_CHARS) {
             this.showToast(`Message too long (max ${MAX_USER_TEXT_CHARS} characters)`, 'error');
             return;
@@ -996,12 +1089,25 @@ class BoardroomApp extends ChatroomApp {
             messagesEl.scrollTop = messagesEl.scrollHeight;
         }
 
+        const runs = this.copilotKit.inFlightRuns();
+        const turnInFlight = runs.some((r) => r.source !== 'hydrate');
+        const autonomous = this._autonomousTurnInFlight();
+        if (turnInFlight || autonomous) {
+            this._showInterjectionStatus(
+                autonomous ? INTERJECTION_STATUS_AUTONOMOUS : INTERJECTION_STATUS_USER,
+                runs.map((r) => r.runId),
+            );
+        }
+
         try {
             await this.copilotKit.sendMessage(text);
         } catch (error) {
+            // RUN_ERROR (error.code) and HTTP failures are surfaced via onError.
             if (error.name !== 'AbortError') {
                 console.error('[CopilotKit] sendMessage failed:', error);
             }
+        } finally {
+            this._syncRunning();
         }
     }
 
@@ -1058,8 +1164,14 @@ class BoardroomApp extends ChatroomApp {
         messagesEl.scrollTop = messagesEl.scrollHeight;
     }
 
+    /** Bubble element ids embed the messageId (`<turn_id>:<role>`), so escape it for selectors. */
+    _bubbleSelector(prefix, messageId) {
+        const id = `${prefix}-${messageId}`;
+        return `#${typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(id) : id}`;
+    }
+
     _appendStreamChunk(chunk, messageId) {
-        const textEl = this.querySelector(`#copilotkit-bubble-${messageId}`);
+        const textEl = this.querySelector(this._bubbleSelector('copilotkit-bubble', messageId));
         if (!textEl) return;
 
         textEl.appendChild(document.createTextNode(chunk));
@@ -1071,12 +1183,12 @@ class BoardroomApp extends ChatroomApp {
     }
 
     _finalizeStreamingBubble(messageId, fullContent) {
-        const textEl = this.querySelector(`#copilotkit-bubble-${messageId}`);
+        const textEl = this.querySelector(this._bubbleSelector('copilotkit-bubble', messageId));
         if (textEl && textEl.textContent.trim() !== fullContent.trim()) {
             textEl.textContent = fullContent;
         }
 
-        const timeEl = this.querySelector(`#copilotkit-time-${messageId}`);
+        const timeEl = this.querySelector(this._bubbleSelector('copilotkit-time', messageId));
         if (timeEl) {
             timeEl.textContent = this._formatNow();
         }
@@ -1174,6 +1286,11 @@ class BoardroomApp extends ChatroomApp {
         if (this._onVisibility) {
             document.removeEventListener('visibilitychange', this._onVisibility);
         }
+        if (this._onPageHide) {
+            window.removeEventListener('pagehide', this._onPageHide);
+            this._onPageHide = null;
+        }
+        this._clearInterjectionStatus();
         super.disconnectedCallback();
         this.dispatchEvent(new CustomEvent('boardroom-disconnected', { bubbles: true }));
     }

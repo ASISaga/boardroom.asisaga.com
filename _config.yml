@@ -25,6 +25,7 @@ exclude:
   - compile-scss.js
   - detect-raw-css.js
   - playwright.config.js
+  - tests/
   - .stylelintrc.json
 
 defaults:
