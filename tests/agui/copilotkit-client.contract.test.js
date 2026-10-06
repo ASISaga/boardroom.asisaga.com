@@ -358,6 +358,68 @@ describe('CopilotKitClient against the Boardroom /ag-ui contract', () => {
     });
   }
 
+  test('a live-only hydrate (mind unavailable) reports live_only through onStateChange', async () => {
+    http = installFetch(() => ({ events: STREAMS.hydrate_live_only }));
+    const { client, calls } = recordingClient();
+    await client.hydrate();
+    assert.deepEqual(calls.state, [{
+      thread_id: THREAD_ID, since_you_were_away: 0, live_only: true, live_only_reason: 'mind_unavailable',
+    }]);
+    assert.equal(client.state.live_only, true);
+    assert.equal(calls.error.length, 0);
+    assert.equal(calls.runFinished.length, 1);
+    await assertAgUiLifecycle(http.served[0]);
+  });
+
+  test('a stream that ends without RUN_FINISHED or RUN_ERROR fails the turn', async () => {
+    http = installFetch(() => ({ events: STREAMS.turn_complete.slice(0, -1) }));
+    const { client, calls } = recordingClient();
+    await assert.rejects(client.sendMessage('hello'), (err) => {
+      assert.equal(err.name, 'RunError');
+      assert.equal(err.code, 'StreamTruncated');
+      assert.equal(err.message, 'The boardroom stream ended before the turn completed');
+      assert.equal(err.message, CopilotKitClient.TRUNCATED_STREAM_MESSAGE);
+      return true;
+    });
+    assert.equal(calls.runFinished.length, 0, 'a truncated turn is not a finished run');
+    assert.equal(calls.turnComplete.length, 0);
+    assert.equal(calls.error.length, 1, 'reported once');
+    assert.equal(client.lastSeen, null);
+    assert.equal(client.isRunning(), false);
+  });
+
+  test('the SSE body is consumed incrementally: RUN_STARTED arrives before the turn ends', async () => {
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    let init;
+    globalThis.fetch = async (url, requestInit) => {
+      init = requestInit;
+      const { runId, threadId } = JSON.parse(requestInit.body);
+      const events = materialize(STREAMS.turn_complete, { runId, threadId });
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream({
+        async start(controller) {
+          controller.enqueue(encoder.encode(`${sse(events.slice(0, 1))}: keepalive\n\n`));
+          await gate;
+          controller.enqueue(encoder.encode(`: keepalive\n\n${sse(events.slice(1))}`));
+          controller.close();
+        },
+      });
+      return new Response(stream, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+    };
+    const { client, calls } = recordingClient();
+    const pending = client.sendMessage('hello');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(init.cache, 'no-store', 'no HTTP cache may hold the stream');
+    assert.equal(calls.runStarted.length, 1, 'RUN_STARTED is handled before the rest of the stream');
+    assert.equal(calls.stepStarted.length, 0);
+    assert.equal(client.isRunning(), true);
+    release();
+    const out = await pending;
+    assert.equal(out.result.turn_id, 't1');
+    assert.equal(calls.error.length, 0, 'keepalive comments are ignored');
+  });
+
   test('nothing after RUN_FINISHED or RUN_ERROR is processed', async () => {
     const trailing = { type: 'TEXT_MESSAGE_START', messageId: 'late', role: 'assistant' };
     http = installFetch(() => ({ events: [...STREAMS.sanitization_rejected, trailing] }));

@@ -155,6 +155,13 @@ const INTERJECTION_STATUS_AUTONOMOUS =
 // Bounded UI timeout for the interjection status (a UI tuning parameter, 07).
 const INTERJECTION_STATUS_TIMEOUT_MS = 90 * 1000;
 
+// Shown from a turn's RUN_STARTED until its first speaker step or message,
+// so a long first LLM call is not a blank screen.
+const DELIBERATING_STATUS = 'The board is deliberating…';
+// Spec 03 "serve live-only" error surface: the hydrate's STATE_SNAPSHOT has
+// live_only: true when the board's memory (mind) is unreachable.
+const LIVE_ONLY_BANNER = 'Live-only: board memory unavailable — history and grounding are off.';
+
 // The backend mints the boardroom thread id (it replaces the client's
 // threadId and returns the real one in RUN_STARTED.threadId); this
 // placeholder is sent until the hydrate's RUN_STARTED reveals it.
@@ -1077,6 +1084,7 @@ class BoardroomApp extends ChatroomApp {
         };
         this.copilotKit.onMessageStart = (messageId, speaker, runId) => {
             this._clearInterjectionStatusFor(runId);
+            this._clearDeliberating(runId);
             this._createStreamingBubble(messageId, speaker);
         };
         this.copilotKit.onMessageEnd = (messageId, fullContent) => {
@@ -1084,14 +1092,17 @@ class BoardroomApp extends ChatroomApp {
         };
         this.copilotKit.onError = (error, runId) => {
             this._clearInterjectionStatusFor(runId);
+            this._clearDeliberating(runId);
             this._handleRunError(error);
         };
         this.copilotKit.onRunStarted = (runId, threadId, source) => {
             if (source === 'hydrate') this._adoptThreadId(threadId);
+            else this._showDeliberating(runId);
             this._syncRunning();
         };
         this.copilotKit.onRunFinished = (content, runId) => {
             this._clearInterjectionStatusFor(runId);
+            this._clearDeliberating(runId);
             this._syncRunning();
         };
         this.copilotKit.onRunResult = (result) => {
@@ -1114,6 +1125,7 @@ class BoardroomApp extends ChatroomApp {
         };
         this.copilotKit.onStepStarted = (speaker, runId) => {
             this._clearInterjectionStatusFor(runId);
+            this._clearDeliberating(runId);
             this._setActiveSpeaker(speaker);
         };
         this.copilotKit.onStepFinished = (speaker) => {
@@ -1124,6 +1136,9 @@ class BoardroomApp extends ChatroomApp {
         this.copilotKit.onProtocolEvent = (event) => this._showProtocolEvent(event);
         this.copilotKit.onCustomEvent = (name, value) => this._handleBoardroomEvent(name, value);
         this.copilotKit.onStateChange = (state) => {
+            // A hydrate's snapshot always says whether mind answered; a turn's
+            // state only changes the banner when it carries live_only itself.
+            if (this._hydrating || (state && 'live_only' in state)) this._setLiveOnly(state);
             const away = Number(state?.since_you_were_away || 0);
             if (away > 0 && this._hydrating) {
                 this.showToast(`${away} boardroom decision${away === 1 ? '' : 's'} while you were away`, 'info');
@@ -1177,6 +1192,57 @@ class BoardroomApp extends ChatroomApp {
         const running = !!this.copilotKit?.isRunning();
         this._setRunning(running);
         if (!running) this._setActiveSpeaker(null);
+        // A run that ended without a terminal callback (e.g. aborted) drops its indicator.
+        if (this._deliberating?.size) {
+            const inFlight = new Set((this.copilotKit?.inFlightRuns() || []).map((r) => r.runId));
+            for (const runId of [...this._deliberating.keys()]) {
+                if (!inFlight.has(runId)) this._clearDeliberating(runId);
+            }
+        }
+    }
+
+    /** "The board is deliberating…" for a turn, until its first speaker step or message. */
+    _showDeliberating(runId) {
+        if (!runId) return;
+        this._deliberating ??= new Map();
+        if (this._deliberating.has(runId)) return;
+        const note = this._appendSystemNote('deliberating', DELIBERATING_STATUS);
+        if (note) {
+            note.setAttribute('aria-live', 'polite');
+            this._deliberating.set(runId, note);
+        }
+    }
+
+    _clearDeliberating(runId) {
+        const note = this._deliberating?.get(runId);
+        if (!note) return;
+        note.remove();
+        this._deliberating.delete(runId);
+    }
+
+    /**
+     * Show or remove the live-only banner (state.live_only === true: mind is
+     * unreachable, so history and grounding are off). It sits above the
+     * messages so re-rendering the conversation never drops it.
+     */
+    _setLiveOnly(state) {
+        const liveOnly = state?.live_only === true;
+        if (!liveOnly) {
+            this._liveOnlyBanner?.remove();
+            this._liveOnlyBanner = null;
+            return;
+        }
+        const messagesEl = this.elements?.messagesContainer;
+        if (!messagesEl?.parentNode) return;
+        if (!this._liveOnlyBanner) {
+            const banner = document.createElement('div');
+            banner.className = 'chatroom__message chatroom__message--system boardroom-note boardroom-note--live-only';
+            banner.setAttribute('role', 'status');
+            banner.textContent = LIVE_ONLY_BANNER;
+            messagesEl.parentNode.insertBefore(banner, messagesEl);
+            this._liveOnlyBanner = banner;
+        }
+        this._liveOnlyBanner.dataset.reason = String(state.live_only_reason || '');
     }
 
     /** Mark the deliberating C-suite member in the members sidebar. */
@@ -1245,8 +1311,9 @@ class BoardroomApp extends ChatroomApp {
             this.showToast('Your message could not be accepted – please rephrase it and retry', 'error');
             return;
         }
-        if (error?.code === 'TurnFailed') {
-            this.showToast('The boardroom turn failed – please try again', 'error');
+        if (error?.name === 'RunError') {
+            // RUN_ERROR.message is for the user (e.g. a truncated turn).
+            this.showToast(error.message || 'The boardroom turn failed – please try again', 'error');
             return;
         }
         if (error?.action === 'contact_support') {
@@ -1268,7 +1335,8 @@ class BoardroomApp extends ChatroomApp {
         const detail = error?.detail || error?.message || 'Unknown error';
         const reference = error?.errorId && !detail.includes(error.errorId) ? ` (reference ${error.errorId})` : '';
         const note = this._appendSystemNote('event-error', `[ERROR]${code}${status}: ${detail}${reference}`);
-        if (note) {
+        // A RUN_ERROR is the turn's outcome, not a log line: it is always shown.
+        if (note && error?.name !== 'RunError') {
             note.dataset.severity = 'error';
             note.hidden = !this._logAllowed('error');
         }

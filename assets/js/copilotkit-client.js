@@ -14,10 +14,18 @@
  * step and message buffer. Only a RUN_FINISHED whose `result` is a Digest is
  * a completed turn; a hydrate's RUN_FINISHED carries no result and a
  * cancelled turn's carries `{cancelled: true}`. RUN_ERROR is terminal and is
- * never followed by RUN_FINISHED.
+ * never followed by RUN_FINISHED; a stream that closes without either is
+ * failed as a RunError (code 'StreamTruncated').
+ *
+ * The SSE body is read incrementally from response.body, so RUN_STARTED,
+ * keepalive comments and speaker events are handled as they arrive; never
+ * read it with response.text()/json(), which buffers until the turn ends.
  */
 
 export class CopilotKitClient {
+  /** RUN_ERROR message for a stream that closed without a terminal event. */
+  static TRUNCATED_STREAM_MESSAGE = 'The boardroom stream ended before the turn completed';
+
   /**
    * @param {object} options
    * @param {string} options.runtimeUrl    - URL of the CopilotKit runtime endpoint
@@ -313,6 +321,9 @@ export class CopilotKitClient {
         method: 'POST',
         headers,
         body: JSON.stringify(requestBody),
+        // An SSE body is read incrementally (see _processSSEStream); never
+        // let an HTTP cache hold it until the turn ends.
+        cache: 'no-store',
         signal: run.controller.signal,
       });
 
@@ -364,6 +375,7 @@ export class CopilotKitClient {
           context: [],
           forwardedProps: options.forwardedProps || {},
         }),
+        cache: 'no-store',
         signal: run.controller.signal,
       });
       if (!response.ok) {
@@ -444,10 +456,28 @@ export class CopilotKitClient {
     }
 
     // A run that errored is not a finished run (07: RUN_ERROR is terminal and
-    // is not RUN_FINISHED). A stream that closed without either still ends
-    // the run for the UI.
+    // is not RUN_FINISHED). A stream that closed without either was cut
+    // short (dropped connection, proxy timeout): fail the run, as the
+    // backend does for a truncated O stream, rather than finish it silently.
+    if (!run.finished) {
+      this._failRun(run, { message: CopilotKitClient.TRUNCATED_STREAM_MESSAGE, code: 'StreamTruncated' });
+    }
     if (!run.error) this._fireRunFinished(fullContent, run);
     return fullContent;
+  }
+
+  /** End a run with a RUN_ERROR (terminal; never a RUN_FINISHED) and report it once. */
+  _failRun(run, { message, code }) {
+    const err = new Error(message ?? 'CopilotKit run error');
+    err.name = 'RunError';
+    err.code = code;
+    err.runId = run.runId;
+    run.error = err;
+    run.step = null;
+    run.finished = true;
+    if (this.onError) {
+      this.onError(err, run.runId);
+    }
   }
 
   _fireRunFinished(content, run) {
@@ -581,16 +611,7 @@ export class CopilotKitClient {
       case 'RUN_ERROR':
       case 'RunError': {
         // Terminal: nothing follows it, and it is never a RUN_FINISHED.
-        const err = new Error(event.message ?? 'CopilotKit run error');
-        err.name = 'RunError';
-        err.code = event.code;
-        err.runId = run.runId;
-        run.error = err;
-        run.step = null;
-        run.finished = true;
-        if (this.onError) {
-          this.onError(err, run.runId);
-        }
+        this._failRun(run, { message: event.message, code: event.code });
         return null;
       }
 

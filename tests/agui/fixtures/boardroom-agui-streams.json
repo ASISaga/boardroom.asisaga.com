@@ -52,5 +52,10 @@
     { "type": "STATE_SNAPSHOT", "snapshot": { "since_you_were_away": 1 } },
     { "type": "MESSAGES_SNAPSHOT", "messages": [ { "id": "t0", "role": "assistant", "content": "prior decision" } ] },
     { "type": "RUN_FINISHED", "threadId": "{{threadId}}", "runId": "{{runId}}" }
+  ],
+  "hydrate_live_only": [
+    { "type": "RUN_STARTED", "threadId": "{{threadId}}", "runId": "{{runId}}" },
+    { "type": "STATE_SNAPSHOT", "snapshot": { "thread_id": "{{threadId}}", "since_you_were_away": 0, "live_only": true, "live_only_reason": "mind_unavailable" } },
+    { "type": "RUN_FINISHED", "threadId": "{{threadId}}", "runId": "{{runId}}" }
   ]
 }
