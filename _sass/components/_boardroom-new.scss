@@ -153,3 +153,24 @@
     @include genesis-entity('imperative');     // Error toast
   }
 }
+
+// Boardroom system notes: source + timestamp header above the message text
+.boardroom-note {
+  @include genesis-entity('secondary');
+
+  .boardroom-note__meta {
+    @include genesis-environment('associative');
+  }
+
+  .boardroom-note__source {
+    @include genesis-cognition('quantum');
+  }
+
+  .boardroom-note__time {
+    @include genesis-entity('latent');
+  }
+
+  .boardroom-note__text {
+    @include genesis-entity('primary');
+  }
+}

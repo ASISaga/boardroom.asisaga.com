@@ -185,6 +185,13 @@ const AUTH_CHECK_LABELS = {
     tenant_registered: 'Organization registered for Boardroom',
 };
 
+const NOTE_SOURCES = {
+    deliberating: 'Boardroom',
+    interjection: 'Boardroom',
+    'event-error': 'Boardroom backend',
+    'unregistered-organization': 'Boardroom auth',
+};
+
 class BoardroomApp extends ChatroomApp {
     constructor() {
         super();
@@ -316,7 +323,7 @@ class BoardroomApp extends ChatroomApp {
     }
 
     _showMsalLog({ level, text }) {
-        const note = this._appendSystemNote(`event-${level}`, `[${level.toUpperCase()}] MSAL: ${text}`);
+        const note = this._appendSystemNote(`event-${level}`, `[${level.toUpperCase()}] ${text}`, 'MSAL');
         if (note) {
             note.dataset.severity = level;
             note.hidden = !this._logAllowed(level);
@@ -1238,7 +1245,19 @@ class BoardroomApp extends ChatroomApp {
             const banner = document.createElement('div');
             banner.className = 'chatroom__message chatroom__message--system boardroom-note boardroom-note--live-only';
             banner.setAttribute('role', 'status');
-            banner.textContent = LIVE_ONLY_BANNER;
+            const meta = document.createElement('div');
+            meta.className = 'boardroom-note__meta';
+            const src = document.createElement('span');
+            src.className = 'boardroom-note__source';
+            src.textContent = 'Boardroom';
+            const time = document.createElement('time');
+            time.className = 'boardroom-note__time';
+            time.textContent = this._formatNow();
+            meta.append(src, time);
+            const body = document.createElement('div');
+            body.className = 'boardroom-note__text';
+            body.textContent = LIVE_ONLY_BANNER;
+            banner.append(meta, body);
             messagesEl.parentNode.insertBefore(banner, messagesEl);
             this._liveOnlyBanner = banner;
         }
@@ -1471,13 +1490,26 @@ class BoardroomApp extends ChatroomApp {
         }
     }
 
-    _appendSystemNote(kind, text) {
+    _appendSystemNote(kind, text, source) {
         const messagesEl = this.elements?.messagesContainer;
         if (!messagesEl) return null;
         const note = document.createElement('div');
         note.className = `chatroom__message chatroom__message--system boardroom-note boardroom-note--${kind}`;
         note.setAttribute('role', 'status');
-        note.textContent = text;
+        const header = document.createElement('div');
+        header.className = 'boardroom-note__meta';
+        const src = document.createElement('span');
+        src.className = 'boardroom-note__source';
+        src.textContent = source || NOTE_SOURCES[kind] || 'Boardroom';
+        const time = document.createElement('time');
+        time.className = 'boardroom-note__time';
+        time.dateTime = new Date().toISOString();
+        time.textContent = this._formatNow();
+        header.append(src, time);
+        const body = document.createElement('div');
+        body.className = 'boardroom-note__text';
+        body.textContent = text;
+        note.append(header, body);
         messagesEl.appendChild(note);
         messagesEl.scrollTop = messagesEl.scrollHeight;
         return note;
@@ -1866,6 +1898,7 @@ class BoardroomApp extends ChatroomApp {
         const timeEl = el.querySelector('.chatroom__time');
         if (timeEl) {
             timeEl.id = `copilotkit-time-${messageId}`;
+            timeEl.textContent = this._formatNow();
             timeEl.hidden = false;
         }
 
