@@ -27,6 +27,26 @@
     { "type": "CUSTOM", "name": "resolution", "value": { "turn_id": "t2", "decision": "extend runway" } },
     { "type": "RUN_FINISHED", "threadId": "{{threadId}}", "runId": "{{runId}}", "result": { "turn_id": "t2", "decision": "extend runway" } }
   ],
+  "turn_complete_with_relay": [
+    { "type": "RUN_STARTED", "threadId": "{{threadId}}", "runId": "{{runId}}" },
+    { "type": "STEP_STARTED", "stepName": "cfo" },
+    { "type": "CUSTOM", "name": "speaker_relay", "value": { "actor": "cfo", "mind_context": "cfo slice: <b>runway</b> 4 months", "prompt": "You are the CFO. <script>alert(1)</script>", "inference": "Runway is four months." } },
+    { "type": "TEXT_MESSAGE_START", "messageId": "t5:cfo", "role": "assistant" },
+    { "type": "TEXT_MESSAGE_CONTENT", "messageId": "t5:cfo", "delta": "Runway is " },
+    { "type": "TEXT_MESSAGE_CONTENT", "messageId": "t5:cfo", "delta": "four months." },
+    { "type": "TEXT_MESSAGE_END", "messageId": "t5:cfo" },
+    { "type": "STEP_FINISHED", "stepName": "cfo" },
+    { "type": "STEP_STARTED", "stepName": "founder" },
+    { "type": "TEXT_MESSAGE_START", "messageId": "t5:founder", "role": "assistant" },
+    { "type": "TEXT_MESSAGE_CONTENT", "messageId": "t5:founder", "delta": "Hold the price." },
+    { "type": "TEXT_MESSAGE_END", "messageId": "t5:founder" },
+    { "type": "STEP_FINISHED", "stepName": "founder" },
+    { "type": "CUSTOM", "name": "speaker_relay", "value": { "actor": "founder", "mind_context": null, "prompt": "You are the founder.", "inference": null } },
+    { "type": "CUSTOM", "name": "speaker_relay", "value": { "actor": "cmo", "mind_context": null, "prompt": null, "inference": null } },
+    { "type": "CUSTOM", "name": "speaker_relay", "value": "not a relay" },
+    { "type": "CUSTOM", "name": "resolution", "value": { "turn_id": "t5", "decision": "hold the price" } },
+    { "type": "RUN_FINISHED", "threadId": "{{threadId}}", "runId": "{{runId}}", "result": { "turn_id": "t5", "decision": "hold the price" } }
+  ],
   "turn_cancelled": [
     { "type": "RUN_STARTED", "threadId": "{{threadId}}", "runId": "{{runId}}" },
     { "type": "STEP_STARTED", "stepName": "cfo" },

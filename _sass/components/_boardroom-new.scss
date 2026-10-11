@@ -174,3 +174,24 @@
     @include genesis-entity('primary');
   }
 }
+
+// Speaker relay: collapsible Mind context / prompt / inference under a speaker's message
+.boardroom-relay {
+  @include genesis-entity('secondary');
+
+  .boardroom-relay__summary {
+    @include genesis-synapse('toggle');
+  }
+
+  .boardroom-relay__section {
+    @include genesis-environment('chronological');
+  }
+
+  .boardroom-relay__label {
+    @include genesis-cognition('gloss');
+  }
+
+  .boardroom-relay__text {
+    @include genesis-cognition('protocol');
+  }
+}

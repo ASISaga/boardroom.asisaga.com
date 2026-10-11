@@ -167,6 +167,14 @@ const LIVE_ONLY_BANNER = 'Live-only: board memory unavailable — history and gr
 // placeholder is sent until the hydrate's RUN_STARTED reveals it.
 const PENDING_THREAD_ID = 'boardroom:pending';
 
+/**
+ * Speaker relay panel (purpose-agent#37, boardroom#79): one collapsible
+ * section per relay field. The values hold user and company data, so they
+ * are only ever set as textContent.
+ */
+const RELAY_PANEL_SUMMARY = 'Mind / Prompt / Inference';
+const RELAY_SECTIONS = [['mind_context', 'Mind context'], ['prompt', 'Prompt'], ['inference', 'Inference']];
+
 // Legacy 403 detail for a tenant with no active registry entry:
 // "this organization is not registered for Boardroom (error_id <32-hex>)".
 // Fallback only, for a backend that predates the structured error body
@@ -1097,6 +1105,9 @@ class BoardroomApp extends ChatroomApp {
         this.copilotKit.onMessageEnd = (messageId, fullContent) => {
             this._finalizeStreamingBubble(messageId, fullContent);
         };
+        this.copilotKit.onSpeakerRelay = (relay, messageId) => {
+            this._renderSpeakerRelay(messageId, relay);
+        };
         this.copilotKit.onError = (error, runId) => {
             this._clearInterjectionStatusFor(runId);
             this._clearDeliberating(runId);
@@ -1480,7 +1491,7 @@ class BoardroomApp extends ChatroomApp {
             const name = String(event.name || '');
             if (/(error|fail)/i.test(name)) c = { level: 'error', text: `${name}: ${typeof event.value === 'string' ? event.value : JSON.stringify(event.value ?? '')}` };
             else if (/(warn|conflict)/i.test(name)) c = { level: 'warning', text: `${name}: ${typeof event.value === 'string' ? event.value : JSON.stringify(event.value ?? '')}` };
-            else if (!['position_stated', 'resolution'].includes(name)) c = { level: 'info', text: `Event: ${name}` };
+            else if (!['position_stated', 'resolution', CopilotKitClient.SPEAKER_RELAY_EVENT].includes(name)) c = { level: 'info', text: `Event: ${name}` };
         }
         if (!c) return;
         const note = this._appendSystemNote(`event-${c.level}`, `[${c.level.toUpperCase()}] ${c.text}`);
@@ -1939,6 +1950,42 @@ class BoardroomApp extends ChatroomApp {
         if (messagesEl) {
             messagesEl.scrollTop = messagesEl.scrollHeight;
         }
+    }
+
+    /**
+     * Attach (or refresh) the collapsible "Mind / Prompt / Inference" panel
+     * on a speaker's bubble. A relay with no text is nothing to show. Text
+     * only: prompts carry user and company data and are never parsed as HTML.
+     */
+    _renderSpeakerRelay(messageId, relay) {
+        const bubble = this.querySelector(this._bubbleSelector('copilotkit-msg', messageId));
+        if (!bubble || !relay || typeof relay !== 'object') return;
+        const sections = RELAY_SECTIONS.filter(([key]) => typeof relay[key] === 'string' && relay[key]);
+        if (!sections.length) return;
+
+        let panel = bubble.querySelector('.boardroom-relay');
+        if (!panel) {
+            panel = document.createElement('details');
+            panel.className = 'boardroom-relay';
+            const textEl = bubble.querySelector('.chatroom__text');
+            if (textEl) textEl.after(panel);
+            else bubble.appendChild(panel);
+        }
+        const summary = document.createElement('summary');
+        summary.className = 'boardroom-relay__summary';
+        summary.textContent = RELAY_PANEL_SUMMARY;
+        panel.replaceChildren(summary, ...sections.map(([key, label]) => {
+            const section = document.createElement('div');
+            section.className = `boardroom-relay__section boardroom-relay__section--${key.replace(/_/g, '-')}`;
+            const labelEl = document.createElement('div');
+            labelEl.className = 'boardroom-relay__label';
+            labelEl.textContent = label;
+            const textEl = document.createElement('pre');
+            textEl.className = 'boardroom-relay__text';
+            textEl.textContent = relay[key];
+            section.append(labelEl, textEl);
+            return section;
+        }));
     }
 
     // ── Boardroom-specific features ─────────────────────────────────────

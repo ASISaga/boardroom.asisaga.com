@@ -17,6 +17,13 @@
  * never followed by RUN_FINISHED; a stream that closes without either is
  * failed as a RunError (code 'StreamTruncated').
  *
+ * Speaker relay (purpose-agent#37, boardroom#79): a CUSTOM `speaker_relay`
+ * event carries a speaker's hydrated Mind context, exact LLM prompt and raw
+ * inference ({actor, mind_context, prompt, inference}). It arrives before
+ * that speaker's text events, or on its own later; it is matched to the
+ * speaker's message in the run and reported through onSpeakerRelay, never
+ * onCustomEvent. A missing or unrecognised relay is nothing to show.
+ *
  * The SSE body is read incrementally from response.body, so RUN_STARTED,
  * keepalive comments and speaker events are handled as they arrive; never
  * read it with response.text()/json(), which buffers until the turn ends.
@@ -25,6 +32,12 @@
 export class CopilotKitClient {
   /** RUN_ERROR message for a stream that closed without a terminal event. */
   static TRUNCATED_STREAM_MESSAGE = 'The boardroom stream ended before the turn completed';
+
+  /** CUSTOM event name of the speaker relay (Mind context / prompt / inference). */
+  static SPEAKER_RELAY_EVENT = 'speaker_relay';
+
+  /** Speaker relay value keys, in display order. */
+  static RELAY_FIELDS = ['mind_context', 'prompt', 'inference'];
 
   /**
    * @param {object} options
@@ -85,6 +98,7 @@ export class CopilotKitClient {
     this.onStreamChunk = null;   // (chunk, messageId, runId) => void
     this.onMessageStart = null;  // (messageId, agentName?, runId) => void
     this.onMessageEnd = null;    // (messageId, fullContent, runId) => void
+    this.onSpeakerRelay = null;  // (relay, messageId, runId) => void  ({actor, mind_context, prompt, inference}; strings or null)
     this.onRunFinished = null;   // (finalContent, runId) => void  (never after RUN_ERROR)
     this.onError = null;         // (error, runId?) => void  (error.code from RUN_ERROR or the HTTP error body)
   }
@@ -129,6 +143,9 @@ export class CopilotKitClient {
       messageBuffer: {},     // messageId -> accumulated text
       speakers: {},          // messageId -> speaker
       messages: [],          // completed assistant messages, one per messageId
+      speakerMessages: {},   // speaker (lowercase) -> messageId of their message in this run
+      pendingRelays: {},     // speaker (lowercase) -> relay received before their message started
+      messageRelays: {},     // messageId -> speaker relay
       finished: false,       // RUN_FINISHED or RUN_ERROR seen
       finishedFired: false,  // onRunFinished delivered
       error: null,           // Error built from RUN_ERROR
@@ -285,9 +302,9 @@ export class CopilotKitClient {
    * @param {string} userMessage - The user's text input
    * @param {object} [options]   - Additional options (context, headers, etc.)
    * @param {string} [options.source] - Envelope source of the run (default 'agui')
-   * @returns {Promise<{runId: string, result: *, messages: Array<{id, name, content}>}>}
+   * @returns {Promise<{runId: string, result: *, messages: Array<{id, name, content, relay?}>}>}
    *   The run's RUN_FINISHED.result and one assistant message per
-   *   messageId/speaker. Rejects with the RUN_ERROR (error.code, error.runId)
+   *   messageId/speaker (with its speaker relay, when one was received). Rejects with the RUN_ERROR (error.code, error.runId)
    *   when the run fails.
    */
   async sendMessage(userMessage, options = {}) {
@@ -487,6 +504,75 @@ export class CopilotKitClient {
     if (this.onRunFinished) this.onRunFinished(content, run.runId);
   }
 
+  /**
+   * Normalise a `speaker_relay` value to {actor, mind_context, prompt,
+   * inference}, each a string or null (a non-string value is shown as JSON).
+   * Returns null for anything with no relay text: nothing to show.
+   */
+  static speakerRelay(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const relay = { actor: typeof value.actor === 'string' && value.actor ? value.actor : null };
+    let any = false;
+    for (const key of CopilotKitClient.RELAY_FIELDS) {
+      const raw = value[key];
+      let text = null;
+      if (typeof raw === 'string') {
+        text = raw;
+      } else if (raw != null) {
+        try { text = JSON.stringify(raw, null, 2) ?? null; } catch (_) { text = null; }
+      }
+      relay[key] = text ? text : null;
+      if (relay[key]) any = true;
+    }
+    return any ? relay : null;
+  }
+
+  static _mergeRelay(prev, next) {
+    if (!prev) return next;
+    const merged = { actor: next.actor ?? prev.actor };
+    for (const key of CopilotKitClient.RELAY_FIELDS) merged[key] = next[key] ?? prev[key];
+    return merged;
+  }
+
+  /** Match a speaker_relay to the speaker's message in this run (or hold it until it starts). */
+  _handleSpeakerRelay(value, run) {
+    const relay = CopilotKitClient.speakerRelay(value);
+    if (!relay) return;
+    const speaker = String(relay.actor ?? run.step ?? '').toLowerCase();
+    if (!speaker) return;
+    const messageId = run.speakerMessages[speaker];
+    if (messageId == null) {
+      run.pendingRelays[speaker] = CopilotKitClient._mergeRelay(run.pendingRelays[speaker], relay);
+      return;
+    }
+    this._deliverRelay(run, messageId, CopilotKitClient._mergeRelay(run.messageRelays[messageId], relay));
+  }
+
+  _deliverRelay(run, messageId, relay) {
+    run.messageRelays[messageId] = relay;
+    const done = run.messages.find((m) => m.id === messageId);
+    if (done) done.relay = { ...relay };
+    if (this.onSpeakerRelay) this.onSpeakerRelay({ ...relay }, messageId, run.runId);
+  }
+
+  /** Open a speaker's message; a relay that arrived before it is delivered now. */
+  _startMessage(messageId, agentName, run) {
+    run.messageBuffer[messageId] = '';
+    const speaker = agentName ?? run.step;
+    run.speakers[messageId] = speaker;
+    if (this.onMessageStart) {
+      this.onMessageStart(messageId, speaker, run.runId);
+    }
+    const key = String(speaker ?? '').toLowerCase();
+    if (!key) return;
+    run.speakerMessages[key] = messageId;
+    const pending = run.pendingRelays[key];
+    if (pending) {
+      delete run.pendingRelays[key];
+      this._deliverRelay(run, messageId, pending);
+    }
+  }
+
   _emitToolCall(id) {
     if (this.onToolCall && this._toolCalls[id]) {
       this.onToolCall({ ...this._toolCalls[id] });
@@ -533,11 +619,7 @@ export class CopilotKitClient {
       // ── Message start ──
       case 'TEXT_MESSAGE_START':
       case 'TextMessageStart': {
-        messageBuffer[event.messageId] = '';
-        run.speakers[event.messageId] = event.agentName ?? run.step;
-        if (this.onMessageStart) {
-          this.onMessageStart(event.messageId, run.speakers[event.messageId], run.runId);
-        }
+        this._startMessage(event.messageId, event.agentName, run);
         return null;
       }
 
@@ -548,11 +630,7 @@ export class CopilotKitClient {
         const chunk = event.delta ?? event.content ?? '';
         if (!(event.messageId in messageBuffer)) {
           // Content without a START event – open the message implicitly
-          messageBuffer[event.messageId] = '';
-          run.speakers[event.messageId] = event.agentName ?? run.step;
-          if (this.onMessageStart) {
-            this.onMessageStart(event.messageId, run.speakers[event.messageId], run.runId);
-          }
+          this._startMessage(event.messageId, event.agentName, run);
         }
         messageBuffer[event.messageId] = (messageBuffer[event.messageId] ?? '') + chunk;
         if (this.onStreamChunk) {
@@ -570,7 +648,10 @@ export class CopilotKitClient {
         // every speaker's deltas joined into one assistant message.
         if (full) {
           const message = this._addMessage('assistant', full, { id: event.messageId, name: speaker });
-          run.messages.push({ id: message.id, name: speaker, content: full });
+          const relay = run.messageRelays[event.messageId];
+          run.messages.push({
+            id: message.id, name: speaker, content: full, ...(relay ? { relay: { ...relay } } : {}),
+          });
         }
         if (this.onMessageEnd) {
           this.onMessageEnd(event.messageId, full, run.runId);
@@ -691,6 +772,10 @@ export class CopilotKitClient {
         return null;
       }
       case 'CUSTOM':
+        if (event.name === CopilotKitClient.SPEAKER_RELAY_EVENT) {
+          this._handleSpeakerRelay(event.value, run);
+          return null;
+        }
         if (this.onCustomEvent) this.onCustomEvent(event.name, event.value, run.runId);
         return null;
 
