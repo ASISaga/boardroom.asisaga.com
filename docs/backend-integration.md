@@ -409,11 +409,27 @@ It arrives before the speaker's text events, or later on its own.
 - `CopilotKitClient` matches the relay to the speaker's message in the run
   and reports it through `onSpeakerRelay(relay, messageId, runId)`, never
   `onCustomEvent`.
-- `boardroom-app-new.js` adds a collapsed "Mind / Prompt / Inference" panel
-  (`.boardroom-relay`) under that speaker's message.
+- `MessageView` (`assets/js/boardroom-app/message-view.js`) adds a collapsed
+  "Mind / Prompt / Inference" panel (`.boardroom-relay`) under that speaker's
+  message.
 - The values are set as text only, never HTML, because prompts contain user
   and company data.
 - A missing, empty or unrecognised relay shows nothing and is not an error.
+
+## Client module layout
+
+The two entry points keep their paths and public APIs; their logic lives in
+small classes beside them.
+
+- `assets/js/copilotkit-client.js` — `CopilotKitClient` (runs, callbacks,
+  event dispatch). Helpers in `assets/js/copilotkit/`: `AgUiHttp` (headers,
+  HTTP errors), `SseReader`, `JsonPatch`, `SpeakerRelay` /
+  `SpeakerRelayTracker`, `AgUiRun` (per-run state).
+- `assets/js/boardroom-app-new.js` — `<boardroom-app>` (`BoardroomApp`,
+  lifecycle and public API). Collaborators in `assets/js/boardroom-app/`,
+  each constructed with the app element: `MsalAuth`, `AuthChecklist`,
+  `AuthGate`, `AguiSession`, `RunStatus`, `MessageView`, `MembersPanel`,
+  `ChatLog`, `BoardroomChrome`; shared values in `constants.js`.
 
 ## Rate Limiting
 
