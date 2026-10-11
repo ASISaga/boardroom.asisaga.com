@@ -27,17 +27,30 @@
  * The SSE body is read incrementally from response.body, so RUN_STARTED,
  * keepalive comments and speaker events are handled as they arrive; never
  * read it with response.text()/json(), which buffers until the turn ends.
+ *
+ * Collaborators (assets/js/copilotkit/):
+ * - AgUiHttp: ids, the /auth/status URL, request headers, HTTP errors
+ * - SseReader: incremental SSE body reader
+ * - AgUiRun: per-run state (AbortController, step, message buffers)
+ * - SpeakerRelay / SpeakerRelayTracker: speaker relay normalising and matching
+ * - JsonPatch: STATE_DELTA application
  */
+
+import { AgUiHttp } from './copilotkit/agui-http.js';
+import { AgUiRun } from './copilotkit/agui-run.js';
+import { JsonPatch } from './copilotkit/json-patch.js';
+import { SpeakerRelay } from './copilotkit/speaker-relay.js';
+import { SseReader } from './copilotkit/sse-reader.js';
 
 export class CopilotKitClient {
   /** RUN_ERROR message for a stream that closed without a terminal event. */
   static TRUNCATED_STREAM_MESSAGE = 'The boardroom stream ended before the turn completed';
 
   /** CUSTOM event name of the speaker relay (Mind context / prompt / inference). */
-  static SPEAKER_RELAY_EVENT = 'speaker_relay';
+  static SPEAKER_RELAY_EVENT = SpeakerRelay.EVENT;
 
   /** Speaker relay value keys, in display order. */
-  static RELAY_FIELDS = ['mind_context', 'prompt', 'inference'];
+  static RELAY_FIELDS = SpeakerRelay.FIELDS;
 
   /**
    * @param {object} options
@@ -70,8 +83,7 @@ export class CopilotKitClient {
       : null;
     this.messages = [];
 
-    // In-flight runs keyed by runId: {runId, source, controller, step,
-    // messageBuffer, speakers, finished, error, result}. Each run owns its
+    // In-flight runs (AgUiRun) keyed by runId. Each run owns its
     // AbortController, so a new send never aborts an in-flight turn.
     this._runs = new Map();
 
@@ -105,13 +117,9 @@ export class CopilotKitClient {
 
   // ── Run classification ─────────────────────────────────────────────────
 
-  /**
-   * True only for a RUN_FINISHED.result that is a turn's Digest: present and
-   * not the `{cancelled: true}` of a cancelled turn (07). A hydrate's
-   * RUN_FINISHED carries no result and is not a turn.
-   */
+  /** See AgUiRun.isCompletedTurn: a Digest, not a hydrate or a cancelled turn. */
   static isCompletedTurn(result) {
-    return result != null && !(typeof result === 'object' && result.cancelled === true);
+    return AgUiRun.isCompletedTurn(result);
   }
 
   /** True while any run (send or hydrate) is in flight. */
@@ -135,74 +143,21 @@ export class CopilotKitClient {
   }
 
   _newRun(source) {
-    const run = {
-      runId: CopilotKitClient.randomUUID(),
-      source,
-      controller: new AbortController(),
-      step: null,            // active speaker of this run (STEP_STARTED.stepName)
-      messageBuffer: {},     // messageId -> accumulated text
-      speakers: {},          // messageId -> speaker
-      messages: [],          // completed assistant messages, one per messageId
-      speakerMessages: {},   // speaker (lowercase) -> messageId of their message in this run
-      pendingRelays: {},     // speaker (lowercase) -> relay received before their message started
-      messageRelays: {},     // messageId -> speaker relay
-      finished: false,       // RUN_FINISHED or RUN_ERROR seen
-      finishedFired: false,  // onRunFinished delivered
-      error: null,           // Error built from RUN_ERROR
-      result: undefined,     // RUN_FINISHED.result
-    };
+    const run = new AgUiRun(source);
     this._runs.set(run.runId, run);
     return run;
   }
 
-  async _buildHeaders(extra = {}) {
-    const headers = {
-      'Content-Type': 'application/json',
-      'Accept': 'text/event-stream',
-      ...this.extraHeaders,
-      ...extra,
-    };
-    // Acquire the Bearer token via the caller-supplied getAccessToken
-    // callback (e.g. MSAL silent token acquisition), if one was provided.
-    if (this.getAccessToken) {
-      try {
-        const token = await this.getAccessToken();
-        if (token) {
-          headers['Authorization'] = `Bearer ${token}`;
-        }
-      } catch (err) {
-        console.error('[CopilotKit] getAccessToken() failed:', err);
-      }
-    }
-    return headers;
+  _buildHeaders(extra = {}) {
+    return AgUiHttp.buildHeaders(
+      { extraHeaders: this.extraHeaders, getAccessToken: this.getAccessToken },
+      extra,
+    );
   }
 
-  /**
-   * Error for a non-2xx response: `status`, plus the backend's structured
-   * error body when it is JSON: `detail`, `code` (e.g. 'tenant_not_registered'),
-   * `action` (sign_in | request_onboarding | request_role | contact_support |
-   * retry | none), `errorId`, `requiredRole` and `errorType` (the body's
-   * `error`). A 401's RFC 6750 challenge is kept as `wwwAuthenticate`.
-   */
-  static async _httpError(response, prefix) {
-    const errText = await response.text().catch(() => response.statusText);
-    const err = new Error(`${prefix} ${response.status}: ${errText}`);
-    err.status = response.status;
-    const challenge = response.headers?.get?.('WWW-Authenticate');
-    if (challenge) err.wwwAuthenticate = challenge;
-    try {
-      const body = JSON.parse(errText);
-      if (body && typeof body === 'object') {
-        if (typeof body.detail === 'string') err.detail = body.detail;
-        if (typeof body.code === 'string') err.code = body.code;
-        if (typeof body.action === 'string') err.action = body.action;
-        if (typeof body.error_id === 'string') err.errorId = body.error_id;
-        if (typeof body.required_role === 'string') err.requiredRole = body.required_role;
-        if (typeof body.error === 'string') err.errorType = body.error;
-        err.body = body;
-      }
-    } catch (_) { /* not JSON */ }
-    return err;
+  /** See AgUiHttp.httpError: the structured error of a non-2xx response. */
+  static _httpError(response, prefix) {
+    return AgUiHttp.httpError(response, prefix);
   }
 
   /**
@@ -224,19 +179,11 @@ export class CopilotKitClient {
 
   /** `{api}/auth/status`, a sibling of the runtime's `/ag-ui` path. */
   static authStatusUrlFor(runtimeUrl) {
-    return String(runtimeUrl || '/ag-ui').replace(/\/[^/]*\/?$/, '/auth/status');
+    return AgUiHttp.authStatusUrlFor(runtimeUrl);
   }
 
-  // ── UUID helper ──────────────────────────────────────────────────────────
-
   static randomUUID() {
-    if (typeof crypto !== 'undefined' && crypto.randomUUID) {
-      return crypto.randomUUID();
-    }
-    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-      const r = Math.random() * 16 | 0;
-      return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
-    });
+    return AgUiHttp.randomUUID();
   }
 
   // ── Thread management ────────────────────────────────────────────────────
@@ -420,23 +367,9 @@ export class CopilotKitClient {
   // ── SSE stream processing ────────────────────────────────────────────────
 
   async _processSSEStream(response, run) {
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
     let fullContent = '';
 
-    const handleLine = (line) => {
-      if (!line.startsWith('data:')) return;
-      const dataStr = line.slice(5).trim();
-      if (!dataStr || dataStr === '[DONE]') return;
-      let event;
-      try {
-        event = JSON.parse(dataStr);
-      } catch (parseError) {
-        // Malformed JSON – log at debug level and skip
-        console.debug('[CopilotKit] Skipping unparseable SSE data:', dataStr, parseError);
-        return;
-      }
+    await SseReader.read(response, (event) => {
       // Nothing may follow a run's RUN_FINISHED or RUN_ERROR (AG-UI lifecycle).
       if (run.finished) {
         console.debug('[CopilotKit] Ignoring event after run end:', event.type);
@@ -453,24 +386,7 @@ export class CopilotKitClient {
       if (chunk) {
         fullContent += chunk;
       }
-    };
-
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-
-        // Split on newlines; keep incomplete last chunk
-        const lines = buffer.split(/\r?\n/);
-        buffer = lines.pop() ?? '';
-        lines.forEach(handleLine);
-      }
-      buffer += decoder.decode();
-      if (buffer) handleLine(buffer);
-    } finally {
-      reader.releaseLock();
-    }
+    });
 
     // A run that errored is not a finished run (07: RUN_ERROR is terminal and
     // is not RUN_FINISHED). A stream that closed without either was cut
@@ -485,13 +401,7 @@ export class CopilotKitClient {
 
   /** End a run with a RUN_ERROR (terminal; never a RUN_FINISHED) and report it once. */
   _failRun(run, { message, code }) {
-    const err = new Error(message ?? 'CopilotKit run error');
-    err.name = 'RunError';
-    err.code = code;
-    err.runId = run.runId;
-    run.error = err;
-    run.step = null;
-    run.finished = true;
+    const err = run.fail({ message, code });
     if (this.onError) {
       this.onError(err, run.runId);
     }
@@ -504,52 +414,18 @@ export class CopilotKitClient {
     if (this.onRunFinished) this.onRunFinished(content, run.runId);
   }
 
-  /**
-   * Normalise a `speaker_relay` value to {actor, mind_context, prompt,
-   * inference}, each a string or null (a non-string value is shown as JSON).
-   * Returns null for anything with no relay text: nothing to show.
-   */
+  /** See SpeakerRelay.normalize: {actor, mind_context, prompt, inference}, or null. */
   static speakerRelay(value) {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-    const relay = { actor: typeof value.actor === 'string' && value.actor ? value.actor : null };
-    let any = false;
-    for (const key of CopilotKitClient.RELAY_FIELDS) {
-      const raw = value[key];
-      let text = null;
-      if (typeof raw === 'string') {
-        text = raw;
-      } else if (raw != null) {
-        try { text = JSON.stringify(raw, null, 2) ?? null; } catch (_) { text = null; }
-      }
-      relay[key] = text ? text : null;
-      if (relay[key]) any = true;
-    }
-    return any ? relay : null;
-  }
-
-  static _mergeRelay(prev, next) {
-    if (!prev) return next;
-    const merged = { actor: next.actor ?? prev.actor };
-    for (const key of CopilotKitClient.RELAY_FIELDS) merged[key] = next[key] ?? prev[key];
-    return merged;
+    return SpeakerRelay.normalize(value);
   }
 
   /** Match a speaker_relay to the speaker's message in this run (or hold it until it starts). */
   _handleSpeakerRelay(value, run) {
-    const relay = CopilotKitClient.speakerRelay(value);
-    if (!relay) return;
-    const speaker = String(relay.actor ?? run.step ?? '').toLowerCase();
-    if (!speaker) return;
-    const messageId = run.speakerMessages[speaker];
-    if (messageId == null) {
-      run.pendingRelays[speaker] = CopilotKitClient._mergeRelay(run.pendingRelays[speaker], relay);
-      return;
-    }
-    this._deliverRelay(run, messageId, CopilotKitClient._mergeRelay(run.messageRelays[messageId], relay));
+    const delivery = run.relays.receive(value, run.step);
+    if (delivery) this._deliverRelay(run, delivery.messageId, delivery.relay);
   }
 
   _deliverRelay(run, messageId, relay) {
-    run.messageRelays[messageId] = relay;
     const done = run.messages.find((m) => m.id === messageId);
     if (done) done.relay = { ...relay };
     if (this.onSpeakerRelay) this.onSpeakerRelay({ ...relay }, messageId, run.runId);
@@ -563,14 +439,8 @@ export class CopilotKitClient {
     if (this.onMessageStart) {
       this.onMessageStart(messageId, speaker, run.runId);
     }
-    const key = String(speaker ?? '').toLowerCase();
-    if (!key) return;
-    run.speakerMessages[key] = messageId;
-    const pending = run.pendingRelays[key];
-    if (pending) {
-      delete run.pendingRelays[key];
-      this._deliverRelay(run, messageId, pending);
-    }
+    const pending = run.relays.messageStarted(speaker, messageId);
+    if (pending) this._deliverRelay(run, messageId, pending);
   }
 
   _emitToolCall(id) {
@@ -581,26 +451,7 @@ export class CopilotKitClient {
 
   /** Apply an RFC 6902 JSON Patch (add/replace/remove) to this.state */
   _applyStateDelta(ops) {
-    const next = JSON.parse(JSON.stringify(this.state || {}));
-    for (const op of Array.isArray(ops) ? ops : []) {
-      const path = String(op.path || '').split('/').slice(1)
-        .map((k) => k.replace(/~1/g, '/').replace(/~0/g, '~'));
-      if (!path.length || path.some((k) => k === '__proto__' || k === 'constructor' || k === 'prototype')) continue;
-      let target = next;
-      for (let i = 0; i < path.length - 1 && target != null; i++) target = target[path[i]];
-      if (target == null || typeof target !== 'object') continue;
-      const key = path[path.length - 1];
-      const isArr = Array.isArray(target);
-      const idx = isArr ? (key === '-' ? target.length : Number(key)) : key;
-      if (op.op === 'add') {
-        if (isArr) target.splice(idx, 0, op.value); else target[idx] = op.value;
-      } else if (op.op === 'replace') {
-        target[idx] = op.value;
-      } else if (op.op === 'remove') {
-        if (isArr) target.splice(idx, 1); else delete target[idx];
-      }
-    }
-    return next;
+    return JsonPatch.apply(this.state, ops);
   }
 
   /**
@@ -608,7 +459,7 @@ export class CopilotKitClient {
    * Supports both camelCase legacy names and SCREAMING_SNAKE AG-UI names.
    *
    * @param {object} event - Parsed JSON event
-   * @param {object} run   - The run the event belongs to (see _newRun)
+   * @param {AgUiRun} run - The run the event belongs to
    * @returns {string|null} - Streamed text chunk, if any
    */
   _processEvent(event, run) {
@@ -648,7 +499,7 @@ export class CopilotKitClient {
         // every speaker's deltas joined into one assistant message.
         if (full) {
           const message = this._addMessage('assistant', full, { id: event.messageId, name: speaker });
-          const relay = run.messageRelays[event.messageId];
+          const relay = run.relays.forMessage(event.messageId);
           run.messages.push({
             id: message.id, name: speaker, content: full, ...(relay ? { relay: { ...relay } } : {}),
           });
@@ -677,7 +528,7 @@ export class CopilotKitClient {
         // Only a Digest-bearing RUN_FINISHED is a completed turn (07): a
         // hydrate carries no result, and a cancelled turn's RUN_FINISHED
         // MUST NOT advance last_seen.
-        if (run.source !== 'hydrate' && CopilotKitClient.isCompletedTurn(result)) {
+        if (run.source !== 'hydrate' && AgUiRun.isCompletedTurn(result)) {
           this.lastSeen = {
             runId: run.runId,
             turnId: result?.turn_id ?? null,
@@ -772,7 +623,7 @@ export class CopilotKitClient {
         return null;
       }
       case 'CUSTOM':
-        if (event.name === CopilotKitClient.SPEAKER_RELAY_EVENT) {
+        if (event.name === SpeakerRelay.EVENT) {
           this._handleSpeakerRelay(event.value, run);
           return null;
         }
