@@ -99,7 +99,7 @@ function recordingClient() {
   const calls = {
     runStarted: [], runFinished: [], runResult: [], turnComplete: [], error: [],
     stepStarted: [], stepFinished: [], messageStart: [], messageEnd: [], custom: [],
-    snapshot: [], state: [],
+    snapshot: [], state: [], relay: [],
   };
   client.onRunStarted = (runId, threadId, source) => calls.runStarted.push({ runId, threadId, source });
   client.onRunFinished = (content, runId) => calls.runFinished.push({ content, runId });
@@ -113,6 +113,7 @@ function recordingClient() {
   client.onCustomEvent = (name, value) => calls.custom.push({ name, value });
   client.onMessagesSnapshot = (messages) => calls.snapshot.push(messages);
   client.onStateChange = (state) => calls.state.push(state);
+  client.onSpeakerRelay = (relay, messageId, runId) => calls.relay.push({ relay, messageId, runId });
   return { client, calls };
 }
 
@@ -198,6 +199,53 @@ describe('CopilotKitClient against the Boardroom /ag-ui contract', () => {
       ['t2:founder', 'founder', 'CFO, the runway?'],
       ['t2:cfo', 'cfo', 'Four months.'],
     ]);
+  });
+
+  describe('speaker relay (Mind context / prompt / inference, boardroom#79)', () => {
+    test('each relay is matched to its speaker\'s message, whether it comes before or after it', async () => {
+      http = installFetch(() => ({ events: STREAMS.turn_complete_with_relay }));
+      const { client, calls } = recordingClient();
+      const out = await client.sendMessage('runway?');
+      const { runId } = http.requests[0].body;
+      const cfo = {
+        actor: 'cfo',
+        mind_context: 'cfo slice: <b>runway</b> 4 months',
+        prompt: 'You are the CFO. <script>alert(1)</script>',
+        inference: 'Runway is four months.',
+      };
+      const founder = { actor: 'founder', mind_context: null, prompt: 'You are the founder.', inference: null };
+      assert.deepEqual(calls.relay, [
+        { relay: cfo, messageId: 't5:cfo', runId },
+        { relay: founder, messageId: 't5:founder', runId },
+      ]);
+      assert.deepEqual(out.messages, [
+        { id: 't5:cfo', name: 'cfo', content: 'Runway is four months.', relay: cfo },
+        { id: 't5:founder', name: 'founder', content: 'Hold the price.', relay: founder },
+      ]);
+      // The relay never reaches the generic CUSTOM handler, nor the message history.
+      assert.deepEqual(calls.custom.map((c) => c.name), ['resolution']);
+      assert.ok(client.getMessages().every((m) => !('relay' in m)));
+      assert.equal(calls.error.length, 0);
+      assert.equal(calls.turnComplete.length, 1);
+    });
+
+    test('a missing or unknown relay is nothing to show, not an error', () => {
+      for (const value of [undefined, null, 'text', 42, [], {}, { actor: 'cfo' },
+        { actor: 'cfo', mind_context: null, prompt: '', inference: undefined }]) {
+        assert.equal(CopilotKitClient.speakerRelay(value), null, JSON.stringify(value));
+      }
+      assert.deepEqual(CopilotKitClient.speakerRelay({ prompt: 'p', mind_context: { goals: ['grow'] } }), {
+        actor: null, mind_context: '{\n  "goals": [\n    "grow"\n  ]\n}', prompt: 'p', inference: null,
+      });
+    });
+
+    test('streams without a relay report none', async () => {
+      http = installFetch(() => ({ events: STREAMS.turn_complete }));
+      const { client, calls } = recordingClient();
+      const out = await client.sendMessage('hello');
+      assert.deepEqual(calls.relay, []);
+      assert.ok(out.messages.every((m) => !('relay' in m)));
+    });
   });
 
   test('a cancelled turn is not a completed turn and does not advance lastSeen', async () => {
