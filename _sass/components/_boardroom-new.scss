@@ -195,3 +195,79 @@
     @include genesis-cognition('protocol');
   }
 }
+
+// Owner's agenda: pending/recent decisions, consent digest, veto with a reason
+.boardroom-agenda {
+  @include genesis-entity('primary');
+  @include genesis-environment('chronological');
+
+  .boardroom-agenda__header {
+    @include genesis-environment('associative');
+  }
+
+  .boardroom-agenda__title,
+  .boardroom-agenda__heading {
+    @include genesis-cognition('axiom');
+  }
+
+  .boardroom-agenda__action {
+    @include genesis-synapse('execute');
+  }
+
+  .boardroom-agenda__status,
+  .boardroom-agenda__empty,
+  .boardroom-agenda__digest-more {
+    @include genesis-cognition('gloss');
+  }
+
+  .boardroom-agenda__decisions,
+  .boardroom-agenda__digest {
+    @include genesis-environment('chronological');
+  }
+
+  .boardroom-agenda__decision {
+    @include genesis-entity('secondary');
+
+    &[data-status='pending'] {
+      @include genesis-state('evolving');
+    }
+
+    &[data-status='vetoed'],
+    &[data-status='called_in'] {
+      @include genesis-state('deprecated');
+    }
+  }
+
+  .boardroom-agenda__item {
+    @include genesis-cognition('motive');
+  }
+
+  .boardroom-agenda__label {
+    @include genesis-cognition('gloss');
+  }
+
+  .boardroom-agenda__value,
+  .boardroom-agenda__digest-line {
+    @include genesis-cognition('discourse');
+  }
+
+  .boardroom-agenda__reversal {
+    @include genesis-entity('imperative');
+  }
+
+  .boardroom-agenda__veto {
+    @include genesis-environment('interaction-form');
+  }
+
+  .boardroom-agenda__veto-label {
+    @include genesis-cognition('gloss');
+  }
+
+  .boardroom-agenda__veto-reason {
+    @include genesis-synapse('input-primary');
+  }
+
+  .boardroom-agenda__veto-submit {
+    @include genesis-synapse('execute');
+  }
+}

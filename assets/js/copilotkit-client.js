@@ -29,7 +29,7 @@
  * read it with response.text()/json(), which buffers until the turn ends.
  *
  * Collaborators (assets/js/copilotkit/):
- * - AgUiHttp: ids, the /auth/status URL, request headers, HTTP errors
+ * - AgUiHttp: ids, the /auth/status and /agenda URLs, request headers, HTTP errors
  * - SseReader: incremental SSE body reader
  * - AgUiRun: per-run state (AbortController, step, message buffers)
  * - SpeakerRelay / SpeakerRelayTracker: speaker relay normalising and matching
@@ -69,10 +69,13 @@ export class CopilotKitClient {
    *   informative-only: it is ignored and never rendered as a speaker.
    * @param {string} [options.authStatusUrl] - Sign-in checklist endpoint
    *   (default: `/auth/status` next to the runtime's `/ag-ui`).
+   * @param {string} [options.agendaUrl] - Owner's agenda endpoint
+   *   (default: `/agenda` next to the runtime's `/ag-ui`).
    */
   constructor(options = {}) {
     this.runtimeUrl = options.runtimeUrl || '/ag-ui';
     this.authStatusUrl = options.authStatusUrl || CopilotKitClient.authStatusUrlFor(this.runtimeUrl);
+    this.agendaUrl = options.agendaUrl || CopilotKitClient.agendaUrlFor(this.runtimeUrl);
     this.threadId = options.threadId || CopilotKitClient.randomUUID();
     this.agentName = options.agentName || null;
     this.extraHeaders = options.headers || {};
@@ -180,6 +183,52 @@ export class CopilotKitClient {
   /** `{api}/auth/status`, a sibling of the runtime's `/ag-ui` path. */
   static authStatusUrlFor(runtimeUrl) {
     return AgUiHttp.authStatusUrlFor(runtimeUrl);
+  }
+
+  // ── Owner's agenda (boardroom-orchestration spec 21) ─────────────────────
+
+  /**
+   * GET {api}/agenda: the owner's view of the company's agenda: recent
+   * decisions with their status and veto window, and the consent digest.
+   * The company comes from the token, never from the page (INV-5).
+   * @returns {Promise<object>} The parsed view body.
+   */
+  async fetchAgenda() {
+    const headers = await this._buildHeaders({ Accept: 'application/json' });
+    delete headers['Content-Type'];
+    const response = await fetch(this.agendaUrl, { method: 'GET', headers, cache: 'no-store' });
+    if (!response.ok) {
+      throw await CopilotKitClient._httpError(response, 'Boardroom agenda error');
+    }
+    return response.json();
+  }
+
+  /**
+   * POST {api}/agenda/veto: the owner vetoes an item's latest decision, with
+   * a reason. F calls O's `Agenda.veto(handle, by="owner", reason, now)`;
+   * outside the veto window it refuses (409, code `veto_window_closed`).
+   * @param {string} item       - The item handle, `item.N`.
+   * @param {string} reason     - Why; binds the item's next discussion.
+   * @param {string} [decidedAt] - The vetoed decision's `decided_at`, so a
+   *   decision recorded since the view was loaded is not vetoed by mistake.
+   * @returns {Promise<object>} The response body (the updated decision).
+   */
+  async vetoDecision(item, reason, decidedAt) {
+    const body = { item: String(item), reason: String(reason) };
+    if (decidedAt) body.decided_at = String(decidedAt);
+    const headers = await this._buildHeaders({ Accept: 'application/json' });
+    const response = await fetch(`${this.agendaUrl}/veto`, {
+      method: 'POST', headers, cache: 'no-store', body: JSON.stringify(body),
+    });
+    if (!response.ok) {
+      throw await CopilotKitClient._httpError(response, 'Boardroom veto error');
+    }
+    return response.json().catch(() => ({}));
+  }
+
+  /** `{api}/agenda`, a sibling of the runtime's `/ag-ui` path. */
+  static agendaUrlFor(runtimeUrl) {
+    return AgUiHttp.agendaUrlFor(runtimeUrl);
   }
 
   static randomUUID() {

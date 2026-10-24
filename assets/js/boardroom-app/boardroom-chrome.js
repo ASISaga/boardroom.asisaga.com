@@ -1,9 +1,10 @@
 /**
  * Boardroom-specific chrome on the static chatroom shell: header actions
- * (screen share, video call, more), formatting and file-attach toolbar
+ * (screen share, video call, the admin-only agenda, more), formatting and file-attach toolbar
  * buttons, and their handlers.
  */
 
+import { AGENDA_BUTTON_LABEL } from './constants.js';
 
 export class BoardroomChrome {
     /** @param {HTMLElement} app - The BoardroomApp host element. */
@@ -49,6 +50,26 @@ export class BoardroomChrome {
             btn.appendChild(img);
             actionsEl.insertBefore(btn, actionsEl.firstChild);
         }
+
+        // Owner's agenda (decisions, consent digest, veto): administrators
+        // only, shown by AuthGate.applyCapabilities().
+        const agendaBtn = document.createElement('button');
+        agendaBtn.type = 'button';
+        agendaBtn.className = 'chatroom-header-btn boardroom-action-btn';
+        agendaBtn.title = AGENDA_BUTTON_LABEL;
+        agendaBtn.setAttribute('aria-label', AGENDA_BUTTON_LABEL);
+        agendaBtn.setAttribute('aria-controls', 'boardroom-agenda');
+        agendaBtn.setAttribute('aria-expanded', 'false');
+        agendaBtn.setAttribute('data-boardroom-admin', '');
+        agendaBtn.setAttribute('data-boardroom-agenda-toggle', '');
+        agendaBtn.hidden = true;
+        const agendaImg = document.createElement('img');
+        agendaImg.src = `${cdnBase}/list-check.svg`;
+        agendaImg.alt = AGENDA_BUTTON_LABEL;
+        agendaImg.width = 18;
+        agendaImg.height = 18;
+        agendaBtn.appendChild(agendaImg);
+        actionsEl.appendChild(agendaBtn);
 
         const moreBtn = document.createElement('button');
         moreBtn.className = 'chatroom-header-btn boardroom-action-btn';
@@ -147,6 +168,12 @@ export class BoardroomChrome {
         const videoCallBtn = this.app.querySelector('[title="Video Call"]');
         if (videoCallBtn && this.app.boardroomConfig.enableVideoCall) {
             videoCallBtn.addEventListener('click', () => this.startVideoCall());
+        }
+
+        const agendaBtn = this.app.querySelector('[data-boardroom-agenda-toggle]');
+        if (agendaBtn && !agendaBtn.dataset.bound) {
+            agendaBtn.dataset.bound = 'true';
+            agendaBtn.addEventListener('click', () => this.app.agendaPanel.toggle());
         }
 
         const fileAttachBtn = this.app.querySelector('[title="Attach File"]');
