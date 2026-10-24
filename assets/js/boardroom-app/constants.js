@@ -100,3 +100,32 @@ export const NOTE_SOURCES = {
     'event-error': 'Boardroom backend',
     'unregistered-organization': 'Boardroom auth',
 };
+
+/**
+ * Owner's agenda view (boardroom-orchestration spec 21; issue #73). The
+ * owner's only power is a veto, inside the veto window from `decided_at`.
+ * Titles, decisions and reasons are untrusted CXO text: textContent only.
+ */
+export const AGENDA_BUTTON_LABEL = 'Agenda';
+export const AGENDA_HEADING = 'Agenda: decisions and veto';
+export const AGENDA_DECISIONS_HEADING = 'Pending and recent decisions';
+export const AGENDA_DIGEST_HEADING = 'Decided below the board since it last met (consent digest)';
+export const AGENDA_EMPTY_DECISIONS = 'No pending or recent decisions.';
+export const AGENDA_EMPTY_DIGEST = 'Nothing decided below the board is waiting to be reported.';
+export const AGENDA_DISABLED = 'The agenda is not switched on for this company.';
+export const AGENDA_UNAVAILABLE = 'The agenda is not available yet.';
+export const AGENDA_LOADING = 'Loading the agenda…';
+export const AGENDA_VETO_REASON_LABEL = 'Reason for the veto (binds the item’s next discussion)';
+export const AGENDA_VETO_SUBMIT = 'Veto';
+export const AGENDA_VETO_DONE = 'Vetoed: the item is back on the agenda with your reason.';
+export const AGENDA_VETO_CLOSED = 'The veto window has closed; the veto was refused.';
+export const AGENDA_VETO_FAILED = 'The veto could not be recorded.';
+// Placeholder default (spec 21 R7 `veto_window_hours`) when the view omits it.
+export const AGENDA_DEFAULT_VETO_WINDOW_HOURS = 24;
+export const AGENDA_STATUS_LABELS = {
+    pending: 'Pending (waiting out the veto window)',
+    effective: 'Effective',
+    vetoed: 'Vetoed',
+    called_in: 'Called in to the board',
+};
+export const AGENDA_LEVEL_LABELS = { one: 'one CXO', pair: 'pair', board: 'board' };

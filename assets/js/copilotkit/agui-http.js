@@ -20,6 +20,11 @@ export class AgUiHttp {
     return String(runtimeUrl || '/ag-ui').replace(/\/[^/]*\/?$/, '/auth/status');
   }
 
+  /** `{api}/agenda`, the owner's agenda view, a sibling of the runtime's `/ag-ui` path. */
+  static agendaUrlFor(runtimeUrl) {
+    return String(runtimeUrl || '/ag-ui').replace(/\/[^/]*\/?$/, '/agenda');
+  }
+
   /**
    * Request headers for an AG-UI POST: SSE accept, the caller's extra
    * headers, and a Bearer token from `getAccessToken` (called fresh for

@@ -416,20 +416,94 @@ It arrives before the speaker's text events, or later on its own.
   and company data.
 - A missing, empty or unrecognised relay shows nothing and is not an error.
 
+### Owner's agenda: decisions, consent digest, veto
+
+O (boardroom-orchestration) keeps a per-company agenda in the Mind, behind
+`BOARDROOM_AGENDA`, which is off by default
+([spec 21](https://github.com/ASISaga/boardroom-orchestration/blob/main/.github/specs/21-agenda.md),
+task `a2a/tasks/0038-agenda.md`, issue
+[#73](https://github.com/ASISaga/boardroom.asisaga.com/issues/73)). The
+human owner reserves nothing. The owner's only power is a veto. The screen
+design will come from the founder later. What exists now:
+
+- An **Agenda** header button (`[data-boardroom-admin]`), shown only when
+  `capabilities.administer` is `true`.
+- It opens `AgendaPanel` (`assets/js/boardroom-app/agenda-panel.js`). The
+  panel's data logic is in `agenda-model.js`.
+
+**Proposed path: F endpoints next to `/ag-ui`.** O adds an entry point that F
+calls. F derives the company from the token (INV-5). F enforces the admin
+role itself and must not rely on the hidden button. Company data goes to
+operators and the company's owner only.
+
+```
+GET  {api}/agenda          → the owner view (below); Cache-Control: no-store
+POST {api}/agenda/veto     {"item": "item.7", "reason": "…", "decided_at": "…"}
+     → 200 the updated decision; F calls
+       Agenda.veto(handle=item, by="owner", reason, now, settings)
+       over AgendaStore.update
+```
+
+Owner view (`boardroom.agenda.owner_view.v1`). It reads the `agenda`,
+`agenda:item:{n:08d}` and `agenda:delegation` rows.
+
+```json
+{
+  "schema": "boardroom.agenda.owner_view.v1",
+  "enabled": true,
+  "now": "2026-10-24T12:00:00Z",
+  "veto_window_hours": 24,
+  "decisions": [{
+    "item": "item.7", "title": "…", "text": "…", "reason": "…", "forecast": "…",
+    "level": "one|pair|board", "deciders": ["CTO", "CFO"],
+    "decided_at": "…", "effective_at": "…", "veto_window_ends_at": "…",
+    "status": "pending|effective|vetoed|called_in",
+    "vetoed": {"by": "owner", "at": "…", "reason": "…"}, "called_in": null
+  }],
+  "consent_digest": {"decisions": [/* same shape, oldest first, ≤ digest_lines_max */], "more": 3}
+}
+```
+
+- `decisions` lists the pending and recent decisions. For each one the panel
+  shows:
+  - the item, text, reason and forecast;
+  - the level and deciders;
+  - `decided_at` and `effective_at`;
+  - the status;
+  - the veto window left.
+- The window ends at `veto_window_ends_at`. When that is missing, it ends at
+  `decided_at` + `veto_window_hours` (placeholder: 24 h). The countdown uses
+  the server's `now`, so the browser clock does not matter.
+- The consent digest lines read
+  `[item.N] <title>: <decision> (<DECIDERS>, one CXO|pair)`, followed by
+  `… and K more not shown.`
+- The veto form appears only while the decision is `pending` or `effective`
+  and inside its window. A reason is required, up to 8000 characters.
+  `decided_at` is sent so that a decision recorded after the view was loaded
+  is not vetoed by mistake. F may refuse a mismatch with 409.
+- Outside the window, O refuses the veto. F answers 409 with
+  `code: "veto_window_closed"`, and the panel reloads.
+- Agenda off: F answers `enabled: false`, or an error with
+  `code: "agenda_disabled"`. A 404 with no code means the backend has no
+  agenda endpoint yet. A 401 or 403 goes through the `/auth/status` re-check.
+- Titles, decisions and reasons are untrusted CXO text. The panel sets them
+  as `textContent` only, never as HTML.
+
 ## Client module layout
 
 The two entry points keep their paths and public APIs; their logic lives in
 small classes beside them.
 
 - `assets/js/copilotkit-client.js` — `CopilotKitClient` (runs, callbacks,
-  event dispatch). Helpers in `assets/js/copilotkit/`: `AgUiHttp` (headers,
+  event dispatch, `fetchAuthStatus`, `fetchAgenda`, `vetoDecision`). Helpers in `assets/js/copilotkit/`: `AgUiHttp` (headers,
   HTTP errors), `SseReader`, `JsonPatch`, `SpeakerRelay` /
   `SpeakerRelayTracker`, `AgUiRun` (per-run state).
 - `assets/js/boardroom-app-new.js` — `<boardroom-app>` (`BoardroomApp`,
   lifecycle and public API). Collaborators in `assets/js/boardroom-app/`,
   each constructed with the app element: `MsalAuth`, `AuthChecklist`,
   `AuthGate`, `AguiSession`, `RunStatus`, `MessageView`, `MembersPanel`,
-  `ChatLog`, `BoardroomChrome`; shared values in `constants.js`.
+  `ChatLog`, `BoardroomChrome`, `AgendaPanel` (with the DOM-free
+  `agenda-model.js`); shared values in `constants.js`.
 
 ## Rate Limiting
 

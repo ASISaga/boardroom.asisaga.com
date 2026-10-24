@@ -58,6 +58,7 @@
  * - MembersPanel (members-panel.js): roster, selection, speaking member
  * - ChatLog (chat-log.js): system notes, log level, protocol event log
  * - BoardroomChrome (boardroom-chrome.js): header/toolbar buttons, files
+ * - AgendaPanel (agenda-panel.js): owner's agenda view, consent digest, veto
  */
 
 import ChatroomApp from '/assets/js/chatroom-app.js';
@@ -70,6 +71,7 @@ import { MessageView } from './boardroom-app/message-view.js';
 import { MembersPanel } from './boardroom-app/members-panel.js';
 import { BoardroomChrome } from './boardroom-app/boardroom-chrome.js';
 import { AguiSession } from './boardroom-app/agui-session.js';
+import { AgendaPanel } from './boardroom-app/agenda-panel.js';
 
 class BoardroomApp extends ChatroomApp {
     constructor() {
@@ -116,6 +118,7 @@ class BoardroomApp extends ChatroomApp {
         this.membersPanel = new MembersPanel(this);
         this.boardroomChrome = new BoardroomChrome(this);
         this.aguiSession = new AguiSession(this);
+        this.agendaPanel = new AgendaPanel(this);
     }
 
     /**
@@ -321,6 +324,7 @@ class BoardroomApp extends ChatroomApp {
             this.aguiSession.onPageHide = null;
         }
         this.runStatus.clearInterjection();
+        this.agendaPanel.close();
         super.disconnectedCallback();
         this.dispatchEvent(new CustomEvent('boardroom-disconnected', { bubbles: true }));
     }

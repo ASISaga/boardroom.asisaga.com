@@ -88,6 +88,7 @@ export class AuthGate {
         this.app.querySelectorAll('[data-boardroom-admin]').forEach((el) => {
             el.hidden = !this.app.capabilities.administer;
         });
+        if (!this.app.capabilities.administer) this.app.agendaPanel?.close();
     }
 
     /**
