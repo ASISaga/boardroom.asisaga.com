@@ -1,7 +1,7 @@
 /**
  * The boardroom's AG-UI session through CopilotKitClient: client wiring,
- * the server-minted thread, hydrate, sends (07 user interjection) and
- * run errors.
+ * the server-minted thread, hydrate, sends (07 user interjection), run
+ * errors, and the board's turn trace (visible board, step 4: TraceView).
  */
 
 import { CopilotKitClient } from '../copilotkit-client.js';
@@ -11,6 +11,7 @@ import {
     INTERJECTION_STATUS_USER,
     INTERJECTION_STATUS_AUTONOMOUS,
     PENDING_THREAD_ID,
+    HISTORY_RETRY_PROP,
 } from './constants.js';
 
 export class AguiSession {
@@ -75,6 +76,7 @@ export class AguiSession {
         };
         this.app.copilotKit.onMessageEnd = (messageId, fullContent) => {
             this.app.messageView.finalizeBubble(messageId, fullContent);
+            this.app.traceView.onBubbleFinished(messageId);
         };
         this.app.copilotKit.onSpeakerRelay = (relay, messageId) => {
             this.app.messageView.renderSpeakerRelay(messageId, relay);
@@ -82,7 +84,9 @@ export class AguiSession {
         this.app.copilotKit.onError = (error, runId) => {
             this.app.runStatus.clearInterjectionFor(runId);
             this.app.runStatus.clearDeliberating(runId);
-            this.handleRunError(error);
+            // The trace's failure card already says it: show the failure once.
+            this.handleRunError(error, { shownInTrace: this.app.traceView.failureShownFor(runId) });
+            this.app.traceView.onRunEnded(runId);
         };
         this.app.copilotKit.onRunStarted = (runId, threadId, source) => {
             if (source === 'hydrate') this.adoptThreadId(threadId);
@@ -92,6 +96,7 @@ export class AguiSession {
         this.app.copilotKit.onRunFinished = (content, runId) => {
             this.app.runStatus.clearInterjectionFor(runId);
             this.app.runStatus.clearDeliberating(runId);
+            this.app.traceView.onRunEnded(runId, this.runSource(runId));
             this.app.runStatus.sync();
         };
         this.app.copilotKit.onRunResult = (result) => {
@@ -122,12 +127,26 @@ export class AguiSession {
                 this.app.membersPanel.setActiveSpeaker(null);
             }
         };
-        this.app.copilotKit.onProtocolEvent = (event) => this.app.chatLog.showProtocolEvent(event);
+        this.app.copilotKit.onProtocolEvent = (event, runId, source) => {
+            this.app.traceView.onEvent(event, runId, source);
+            const turnId = this.app.traceView.runTurns.get(runId);
+            if (turnId) this.app.chatLog.labelRun(runId, turnId);
+            this.app.chatLog.showProtocolEvent(event, runId, source);
+        };
+        // Trace entries are the board's work, never speech and never a CUSTOM log line.
+        this.app.copilotKit.onTraceEntry = (raw, runId, source) => {
+            this.app.traceView.receive(raw, runId);
+            const turnId = this.app.traceView.runTurns.get(runId);
+            if (turnId) this.app.chatLog.labelRun(runId, turnId);
+            if (raw?.phase !== 'idle') this.app.chatLog.markDeliberated(runId, source);
+        };
+        this.app.copilotKit.onActivity = () => this.app.traceView.onActivity();
         this.app.copilotKit.onCustomEvent = (name, value) => this.handleBoardroomEvent(name, value);
         this.app.copilotKit.onStateChange = (state) => {
             // A hydrate's snapshot always says whether mind answered; a turn's
             // state only changes the banner when it carries live_only itself.
-            if (this.hydrating || (state && 'live_only' in state)) this.app.runStatus.setLiveOnly(state);
+            if (this.hydrating || (state && ('live_only' in state || 'memory' in state))) this.app.runStatus.setLiveOnly(state);
+            if (this.hydrating) this.app.traceView.loadState(state);
             const away = Number(state?.since_you_were_away || 0);
             if (away > 0 && this.hydrating) {
                 this.app.showToast(`${away} boardroom decision${away === 1 ? '' : 's'} while you were away`, 'info');
@@ -137,7 +156,10 @@ export class AguiSession {
                 detail: { state, conversationId: this.app.conversationId },
             }));
         };
-        this.app.copilotKit.onMessagesSnapshot = (messages) => this.app.messageView.renderSnapshot(messages);
+        this.app.copilotKit.onMessagesSnapshot = (messages) => {
+            this.app.messageView.renderSnapshot(messages);
+            this.app.traceView.onMessagesSnapshot(messages);
+        };
         this.syncThread();
     }
 
@@ -160,7 +182,12 @@ export class AguiSession {
         this.app.copilotKit.setThread(threadId);
     }
 
-    handleRunError(error) {
+    /** The source ('hydrate' or a send) of an in-flight run, if known. */
+    runSource(runId) {
+        return this.app.copilotKit?.runSource(runId);
+    }
+
+    handleRunError(error, { shownInTrace = false } = {}) {
         console.error('[Boardroom] AG-UI error:', error);
         this.app.runStatus.sync();
         this.app.hideLoading();
@@ -169,6 +196,7 @@ export class AguiSession {
             this.app.authGate.onRejected(error);
             return;
         }
+        if (shownInTrace && error?.name === 'RunError') return;
         this.app.chatLog.errorNote(error);
         // RUN_ERROR codes from the backend (07 turn_failed / sanitization).
         if (error?.code === 'SanitizationRejected') {
@@ -216,12 +244,14 @@ export class AguiSession {
     /**
      * Load the last turns from mind (server hydrate; does not invoke the
      * orchestrator). Autonomous EventGrid/cron turns surface here.
+     * `retryHistory` asks the backend to read mind again now (the memory
+     * banner's "Retry now"; forwardedProps.retry_history, proposed to step 3).
      */
-    async hydrate() {
+    async hydrate({ retryHistory = false } = {}) {
         if (!this.app.copilotKit || this.app.copilotKit.isRunning() || this.hydrating || this.app.authChecklist.blocked) return;
         this.hydrating = true;
         try {
-            await this.app.copilotKit.hydrate();
+            await this.app.copilotKit.hydrate(retryHistory ? { forwardedProps: { [HISTORY_RETRY_PROP]: true } } : {});
             this.app.msalAuth.clearRedirectGuard();
         } catch (error) {
             if (error?.name !== 'AbortError') {

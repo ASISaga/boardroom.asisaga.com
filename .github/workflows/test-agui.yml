@@ -4,6 +4,8 @@ on:
   pull_request:
     paths:
       - 'assets/js/copilotkit-client.js'
+      - 'assets/js/copilotkit/**'
+      - 'assets/js/boardroom-app/**'
       - 'tests/agui/**'
       - 'package.json'
       - '.github/workflows/test-agui.yml'
@@ -12,6 +14,8 @@ on:
       - main
     paths:
       - 'assets/js/copilotkit-client.js'
+      - 'assets/js/copilotkit/**'
+      - 'assets/js/boardroom-app/**'
       - 'tests/agui/**'
       - 'package.json'
       - '.github/workflows/test-agui.yml'

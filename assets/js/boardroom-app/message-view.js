@@ -103,6 +103,12 @@ export class MessageView {
 
     finalizeBubble(messageId, fullContent) {
         const textEl = this.app.querySelector(this.bubbleSelector('copilotkit-bubble', messageId));
+        // A speaker with no speech (e.g. the chair, whose routing is a trace
+        // line, not speech) has no speech bubble.
+        if (!String(fullContent ?? '').trim() && !textEl?.textContent.trim()) {
+            this.app.querySelector(this.bubbleSelector('copilotkit-msg', messageId))?.remove();
+            return;
+        }
         if (textEl && textEl.textContent.trim() !== fullContent.trim()) {
             textEl.textContent = fullContent;
         }

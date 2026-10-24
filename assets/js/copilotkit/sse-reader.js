@@ -15,9 +15,11 @@ export class SseReader {
    *
    * @param {Response} response
    * @param {(event: object) => void} onEvent
+   * @param {() => void} [onChunk] - called for every chunk read, keepalive
+   *   comments included (the connection is up).
    * @returns {Promise<void>} Resolves when the body is fully read.
    */
-  static async read(response, onEvent) {
+  static async read(response, onEvent, onChunk = null) {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
@@ -31,6 +33,7 @@ export class SseReader {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
+        if (onChunk) onChunk();
         buffer += decoder.decode(value, { stream: true });
 
         // Split on newlines; keep incomplete last chunk

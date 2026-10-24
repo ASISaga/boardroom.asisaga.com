@@ -1,6 +1,11 @@
 /**
  * The boardroom chat's log: system notes (source + time + text), the
- * user-selectable log level, AG-UI protocol events and MSAL log entries.
+ * user-selectable log level and the board's AG-UI protocol events, labelled
+ * by turn. A run that held no deliberation is one idle line (RunLogGate).
+ *
+ * Browser-library lines (MSAL) are never mixed into the board's events:
+ * they go to a separate, collapsed "Browser library log" that is off by
+ * default and honours the same level selector.
  */
 
 import { CopilotKitClient } from '../copilotkit-client.js';
@@ -9,13 +14,30 @@ import {
     LOG_RANKS,
     LOG_LEVEL_OPTIONS,
     NOTE_SOURCES,
+    CLIENT_LOG_SUMMARY,
+    CLIENT_LOG_SHOW_LABEL,
 } from './constants.js';
+import { RunLogGate } from './board-status-model.js';
+import { ClientLogBuffer } from './client-log-model.js';
+
+function localStorageOrNull() {
+    try {
+        return typeof localStorage === 'undefined' ? null : localStorage;
+    } catch (e) {
+        return null;
+    }
+}
 
 export class ChatLog {
     /** @param {HTMLElement} app - The BoardroomApp host element. */
     constructor(app) {
         this.app = app;
         this.control = null;
+        this.gate = new RunLogGate();
+        this.clientLog = new ClientLogBuffer({ storage: localStorageOrNull() });
+        this.clientLogEl = null;
+        this.runTurns = new Map();   // runId -> turnId, for the turn label
+        this.idleNote = null;
     }
 
     level() {
@@ -56,6 +78,50 @@ export class ChatLog {
         wrap.appendChild(label);
         messagesEl.parentNode.insertBefore(wrap, messagesEl);
         this.control = wrap;
+        this.buildClientLog(wrap);
+    }
+
+    /**
+     * The browser-library log: a collapsed section after the level
+     * selector, with its own switch (off by default). Its lines are kept
+     * in a bounded buffer and rendered only while the switch is on.
+     */
+    buildClientLog(after) {
+        if (this.clientLogEl || !after?.parentNode) return;
+        const section = document.createElement('details');
+        section.className = 'boardroom-client-log';
+        const summary = document.createElement('summary');
+        summary.className = 'boardroom-client-log__summary';
+        summary.textContent = CLIENT_LOG_SUMMARY;
+        const label = document.createElement('label');
+        label.className = 'boardroom-client-log__filter';
+        const input = document.createElement('input');
+        input.type = 'checkbox';
+        input.checked = this.clientLog.visible;
+        input.addEventListener('change', () => {
+            this.clientLog.setVisible(input.checked);
+            this.renderClientLog();
+        });
+        label.append(input, document.createTextNode(` ${CLIENT_LOG_SHOW_LABEL}`));
+        const list = document.createElement('ol');
+        list.className = 'boardroom-client-log__lines';
+        section.append(summary, label, list);
+        after.after(section);
+        this.clientLogEl = { section, list, input };
+        this.renderClientLog();
+    }
+
+    renderClientLog() {
+        if (!this.clientLogEl) return;
+        const lines = this.clientLog.shown((level) => this.allowed(level)).map((e) => {
+            const li = document.createElement('li');
+            li.className = 'boardroom-client-log__line';
+            li.dataset.severity = e.level;
+            li.textContent = `${e.source} [${e.level.toUpperCase()}] ${e.text}`;
+            return li;
+        });
+        this.clientLogEl.list.replaceChildren(...lines);
+        this.clientLogEl.list.hidden = !this.clientLog.visible;
     }
 
     /** Re-filter notes already in the chat after the level changes. */
@@ -63,15 +129,47 @@ export class ChatLog {
         this.app.elements?.messagesContainer?.querySelectorAll('[data-severity]').forEach((n) => {
             n.hidden = !this.allowed(n.dataset.severity);
         });
+        this.renderClientLog();
     }
 
+    /** An MSAL log entry: kept apart from the board's events, never in the chat. */
     showMsalLog({ level, text }) {
-        const note = this.note(`event-${level}`, `[${level.toUpperCase()}] ${text}`, 'MSAL');
-        if (note) {
-            note.dataset.severity = level;
-            note.hidden = !this.allowed(level);
+        const entry = this.clientLog.add({ source: 'MSAL', level, text });
+        if (this.clientLog.visible && this.allowed(level)) this.renderClientLog();
+        return entry;
+    }
+
+    /** The run's turn is known: label its log lines with it. */
+    labelRun(runId, turnId) {
+        if (!runId || !turnId || this.runTurns.get(runId) === turnId) return;
+        this.runTurns.set(runId, turnId);
+        this.app.elements?.messagesContainer?.querySelectorAll('.boardroom-note[data-run-id]').forEach((n) => {
+            if (n.dataset.runId === runId) this.setTurnLabel(n, turnId);
+        });
+    }
+
+    setTurnLabel(note, turnId) {
+        if (!turnId || note.dataset.turnId === turnId) return;
+        note.dataset.turnId = turnId;
+        let label = note.querySelector('.boardroom-note__turn');
+        if (!label) {
+            label = document.createElement('span');
+            label.className = 'boardroom-note__turn';
+            note.querySelector('.boardroom-note__meta')?.appendChild(label);
         }
-        return note;
+        label.textContent = `Turn ${turnId.slice(0, 8)}`;
+    }
+
+    /** A run held deliberation (speech or a trace entry): write its held lines. */
+    markDeliberated(runId, source) {
+        for (const line of this.gate.deliberated(runId, source)) this.writeLine(line, runId);
+    }
+
+    /** One idle line for a run (or page load) that held no deliberation; it replaces the last one. */
+    idleLine(text) {
+        this.idleNote?.remove();
+        this.idleNote = this.note('idle', text);
+        return this.idleNote;
     }
 
     errorNote(error) {
@@ -112,24 +210,34 @@ export class ChatLog {
         }
     }
 
-    showProtocolEvent(event) {
+    showProtocolEvent(event, runId, source) {
         const type = String(event?.type || '');
         let c = this.classify(event);
-        if (!c && type === 'CUSTOM') {
+        if (!c && type === 'CUSTOM' && event.name !== CopilotKitClient.TRACE_EVENT) {
             const name = String(event.name || '');
             if (/(error|fail)/i.test(name)) c = { level: 'error', text: `${name}: ${typeof event.value === 'string' ? event.value : JSON.stringify(event.value ?? '')}` };
             else if (/(warn|conflict)/i.test(name)) c = { level: 'warning', text: `${name}: ${typeof event.value === 'string' ? event.value : JSON.stringify(event.value ?? '')}` };
             else if (!['position_stated', 'resolution', CopilotKitClient.SPEAKER_RELAY_EVENT].includes(name)) c = { level: 'info', text: `Event: ${name}` };
         }
-        if (!c) return;
-        const note = this.note(`event-${c.level}`, `[${c.level.toUpperCase()}] ${c.text}`);
+        if (!runId) {
+            if (c) this.writeLine(c, runId);
+            return;
+        }
+        const { lines, idle } = this.gate.onEvent(event, runId, source, c);
+        for (const line of lines) this.writeLine(line, runId);
+        if (idle) this.idleLine(this.app.traceView?.idleText() || 'No round is running.');
+    }
+
+    writeLine(c, runId) {
+        const note = this.note(`event-${c.level}`, `[${c.level.toUpperCase()}] ${c.text}`, undefined, { runId });
         if (note) {
             note.dataset.severity = c.level;
             note.hidden = !this.allowed(c.level);
         }
+        return note;
     }
 
-    note(kind, text, source) {
+    note(kind, text, source, { runId = null } = {}) {
         const messagesEl = this.app.elements?.messagesContainer;
         if (!messagesEl) return null;
         const note = document.createElement('div');
@@ -149,6 +257,10 @@ export class ChatLog {
         body.className = 'boardroom-note__text';
         body.textContent = text;
         note.append(header, body);
+        if (runId) {
+            note.dataset.runId = runId;
+            if (this.runTurns.has(runId)) this.setTurnLabel(note, this.runTurns.get(runId));
+        }
         messagesEl.appendChild(note);
         messagesEl.scrollTop = messagesEl.scrollHeight;
         return note;

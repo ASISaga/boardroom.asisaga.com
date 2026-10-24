@@ -173,6 +173,179 @@
   .boardroom-note__text {
     @include genesis-entity('primary');
   }
+
+  .boardroom-note__turn,
+  .boardroom-note__retry {
+    @include genesis-cognition('gloss');
+  }
+
+  .boardroom-note__retry-now {
+    @include genesis-synapse('execute');
+  }
+
+  &.boardroom-note--live-only {
+    @include genesis-state('deprecated');
+  }
+}
+
+// The board's status strip: running or idle, speaker, phase, time, wait, silence
+.boardroom-status {
+  @include genesis-environment('associative');
+  @include genesis-entity('secondary');
+
+  &[data-state='running'] {
+    @include genesis-state('active');
+  }
+
+  &[data-state='idle'] {
+    @include genesis-state('stable');
+  }
+
+  .boardroom-status__state {
+    @include genesis-cognition('discourse');
+  }
+
+  .boardroom-status__elapsed,
+  .boardroom-status__wait {
+    @include genesis-cognition('gloss');
+  }
+
+  .boardroom-status__silence {
+    @include genesis-entity('imperative');
+  }
+
+  .boardroom-status__operator {
+    @include genesis-synapse('toggle');
+  }
+}
+
+// One turn's timeline: opening, routing lines, speakers' phases, summary
+.boardroom-turn {
+  @include genesis-entity('secondary');
+  @include genesis-environment('chronological');
+
+  &[data-status='running'] {
+    @include genesis-state('evolving');
+  }
+
+  &[data-status='unavailable'],
+  &[data-status='incomplete'] {
+    @include genesis-state('deprecated');
+  }
+
+  .boardroom-turn__header,
+  .boardroom-turn__detail-toggle {
+    @include genesis-synapse('toggle');
+  }
+
+  .boardroom-turn__opened,
+  .boardroom-turn__summary {
+    @include genesis-cognition('discourse');
+  }
+
+  .boardroom-turn__timeline,
+  .boardroom-turn__phases {
+    @include genesis-environment('chronological');
+  }
+
+  .boardroom-turn__routing,
+  .boardroom-turn__board,
+  .boardroom-turn__idle {
+    @include genesis-cognition('motive');
+  }
+
+  .boardroom-turn__speaker {
+    @include genesis-entity('primary');
+  }
+
+  .boardroom-turn__speaker-name {
+    @include genesis-cognition('axiom');
+  }
+
+  .boardroom-turn__phase {
+    @include genesis-cognition('discourse');
+
+    &[data-state='running'] {
+      @include genesis-state('active');
+    }
+
+    &[data-state='failed'],
+    &[data-state='unended'] {
+      @include genesis-state('deprecated');
+    }
+
+    &[data-state='not-reported'],
+    &[data-state='skipped'] {
+      @include genesis-entity('latent');
+    }
+  }
+
+  .boardroom-turn__phase-text,
+  .boardroom-turn__wait,
+  .boardroom-turn__context {
+    @include genesis-cognition('gloss');
+  }
+
+  .boardroom-turn__missing,
+  .boardroom-turn__unavailable {
+    @include genesis-entity('imperative');
+  }
+
+  .boardroom-turn__detail-text {
+    @include genesis-cognition('protocol');
+  }
+
+  .boardroom-turn__copy {
+    @include genesis-synapse('execute');
+  }
+}
+
+// A speaker's failure card: what failed, why, what happens next; detail for operators
+.boardroom-failure {
+  @include genesis-entity('imperative');
+
+  .boardroom-failure__title {
+    @include genesis-cognition('axiom');
+  }
+
+  .boardroom-failure__text {
+    @include genesis-cognition('discourse');
+  }
+
+  .boardroom-failure__tags {
+    @include genesis-environment('associative');
+  }
+
+  .boardroom-failure__cause,
+  .boardroom-failure__next {
+    @include genesis-cognition('gloss');
+  }
+
+  .boardroom-failure__detail-toggle {
+    @include genesis-synapse('toggle');
+  }
+
+  .boardroom-failure__detail-text {
+    @include genesis-cognition('protocol');
+  }
+}
+
+// Browser-library log (MSAL): collapsed, off by default, apart from the board's events
+.boardroom-client-log {
+  @include genesis-entity('latent');
+
+  .boardroom-client-log__summary,
+  .boardroom-client-log__filter {
+    @include genesis-synapse('toggle');
+  }
+
+  .boardroom-client-log__lines {
+    @include genesis-environment('chronological');
+  }
+
+  .boardroom-client-log__line {
+    @include genesis-cognition('protocol');
+  }
 }
 
 // Speaker relay: collapsible Mind context / prompt / inference under a speaker's message

@@ -28,6 +28,13 @@
  * keepalive comments and speaker events are handled as they arrive; never
  * read it with response.text()/json(), which buffers until the turn ends.
  *
+ * Turn trace (visible board, issue #75): a `boardroom.trace.v1` entry arrives
+ * as a CUSTOM `boardroom_trace` event (its `value` is the entry) or as a bare
+ * trace frame (`schema` and no `type`). It is reported raw through
+ * onTraceEntry, never onCustomEvent; the page validates it (trace-model.js).
+ * onActivity reports every chunk of the stream, keepalives included, so the
+ * page can tell a quiet backend from a broken connection.
+ *
  * Collaborators (assets/js/copilotkit/):
  * - AgUiHttp: ids, the /auth/status and /agenda URLs, request headers, HTTP errors
  * - SseReader: incremental SSE body reader
@@ -41,6 +48,7 @@ import { AgUiRun } from './copilotkit/agui-run.js';
 import { JsonPatch } from './copilotkit/json-patch.js';
 import { SpeakerRelay } from './copilotkit/speaker-relay.js';
 import { SseReader } from './copilotkit/sse-reader.js';
+import { TRACE_EVENT, traceEntryOf } from './boardroom-app/trace-model.js';
 
 export class CopilotKitClient {
   /** RUN_ERROR message for a stream that closed without a terminal event. */
@@ -51,6 +59,9 @@ export class CopilotKitClient {
 
   /** Speaker relay value keys, in display order. */
   static RELAY_FIELDS = SpeakerRelay.FIELDS;
+
+  /** CUSTOM event name of a turn trace entry (boardroom.trace.v1). */
+  static TRACE_EVENT = TRACE_EVENT;
 
   /**
    * @param {object} options
@@ -102,7 +113,9 @@ export class CopilotKitClient {
     // Callbacks. `runId` is the AG-UI run the event belongs to.
     this.onStepStarted = null;   // (speaker, runId) => void
     this.onStepFinished = null;  // (speaker, runId) => void
-    this.onProtocolEvent = null; // (event, runId) => void  (every AG-UI event received)
+    this.onProtocolEvent = null; // (event, runId, source) => void  (every AG-UI event received)
+    this.onTraceEntry = null;    // (rawEntry, runId, source) => void  (boardroom.trace.v1, unvalidated)
+    this.onActivity = null;      // (runId, source) => void  (any bytes of a run's stream, keepalives included)
     this.onCustomEvent = null;   // (name, value, runId) => void
     this.onRunResult = null;     // (result, runId) => void  (any RUN_FINISHED.result, may be undefined)
     this.onTurnComplete = null;  // (digest, runId) => void  (Digest-bearing RUN_FINISHED only)
@@ -138,6 +151,11 @@ export class CopilotKitClient {
     return [...this._runs.values()]
       .filter((run) => !run.finished)
       .map(({ runId, source }) => ({ runId, source }));
+  }
+
+  /** The source ('hydrate', or a send's source) of a run still known to the client, finished or not. */
+  runSource(runId) {
+    return this._runs.get(runId)?.source;
   }
 
   _isRosterStep(stepName) {
@@ -418,6 +436,14 @@ export class CopilotKitClient {
   async _processSSEStream(response, run) {
     let fullContent = '';
 
+    const onChunk = () => {
+      if (!this.onActivity) return;
+      try {
+        this.onActivity(run.runId, run.source);
+      } catch (hookError) {
+        console.debug('[CopilotKit] onActivity failed:', hookError);
+      }
+    };
     await SseReader.read(response, (event) => {
       // Nothing may follow a run's RUN_FINISHED or RUN_ERROR (AG-UI lifecycle).
       if (run.finished) {
@@ -426,7 +452,7 @@ export class CopilotKitClient {
       }
       if (this.onProtocolEvent) {
         try {
-          this.onProtocolEvent(event, run.runId);
+          this.onProtocolEvent(event, run.runId, run.source);
         } catch (hookError) {
           console.debug('[CopilotKit] onProtocolEvent failed:', hookError);
         }
@@ -435,7 +461,7 @@ export class CopilotKitClient {
       if (chunk) {
         fullContent += chunk;
       }
-    });
+    }, onChunk);
 
     // A run that errored is not a finished run (07: RUN_ERROR is terminal and
     // is not RUN_FINISHED). A stream that closed without either was cut
@@ -514,6 +540,20 @@ export class CopilotKitClient {
   _processEvent(event, run) {
     const { type } = event;
     const messageBuffer = run.messageBuffer;
+
+    // A turn trace entry is the board's work, not speech or a custom event.
+    const traceEntry = traceEntryOf(event);
+    if (traceEntry !== undefined) {
+      if (this.onTraceEntry) {
+        try {
+          this.onTraceEntry(traceEntry, run.runId, run.source);
+        } catch (hookError) {
+          // A trace the page cannot handle never breaks the turn.
+          console.debug('[CopilotKit] onTraceEntry failed:', hookError);
+        }
+      }
+      return null;
+    }
 
     switch (type) {
       // ── Message start ──

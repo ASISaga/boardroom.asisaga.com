@@ -1,13 +1,24 @@
 /**
  * Run status indicators: busy state, "The board is deliberating…", the 07
- * user-interjection status and the live-only (mind unavailable) banner.
+ * user-interjection status and the memory banner (mind unavailable: its
+ * cause, what it affects, the retry state and a "Retry now" button).
  */
 
 import {
     INTERJECTION_STATUS_TIMEOUT_MS,
     DELIBERATING_STATUS,
-    LIVE_ONLY_BANNER,
+    LIVE_ONLY_TITLE,
 } from './constants.js';
+import {
+    memoryReport,
+    memoryBanner,
+    historyEmpty,
+    autoRetryDelay,
+    pageRetryText,
+    RETRY_NOW_LABEL,
+    HISTORY_EMPTY_TEXT,
+    HISTORY_UNAVAILABLE_EMPTY_TEXT,
+} from './memory-banner-model.js';
 
 export class RunStatus {
     /** @param {HTMLElement} app - The BoardroomApp host element. */
@@ -17,6 +28,11 @@ export class RunStatus {
         this.deliberating = null;
         this.interjection = null;
         this.liveOnlyBanner = null;
+        this.bannerState = null;
+        this.retryTimer = null;
+        this.retryTicker = null;
+        this.pageRetryAt = null;
+        this.emptyStateText = null;
     }
 
     /** Disable/enable the input while an AG-UI run is streaming. */
@@ -64,40 +80,124 @@ export class RunStatus {
     }
 
     /**
-     * Show or remove the live-only banner (state.live_only === true: mind is
-     * unreachable, so history and grounding are off). It sits above the
-     * messages so re-rendering the conversation never drops it.
+     * Show, update or remove the memory banner from a hydrate's state
+     * (`memory` object, or the older `live_only`). It names the cause class,
+     * what is affected, whether a retry is under way and when, and offers
+     * "Retry now". It sits above the messages so re-rendering the
+     * conversation never drops it, and clears itself when the cause clears:
+     * the page reads history again on the server's schedule, or every
+     * minute when none is reported.
      */
     setLiveOnly(state) {
-        const liveOnly = state?.live_only === true;
-        if (!liveOnly) {
-            this.liveOnlyBanner?.remove();
-            this.liveOnlyBanner = null;
+        this.setEmptyState(state);
+        // A hydrate's snapshot always says whether mind answered: silence is "ok".
+        if (!memoryReport(state)) {
+            if (this.app.aguiSession?.hydrating) this.clearLiveOnly();
+            return;
+        }
+        const banner = memoryBanner(state);
+        if (!banner) {
+            this.clearLiveOnly();
             return;
         }
         const messagesEl = this.app.elements?.messagesContainer;
         if (!messagesEl?.parentNode) return;
         if (!this.liveOnlyBanner) {
-            const banner = document.createElement('div');
-            banner.className = 'chatroom__message chatroom__message--system boardroom-note boardroom-note--live-only';
-            banner.setAttribute('role', 'status');
+            const el = document.createElement('div');
+            el.className = 'chatroom__message chatroom__message--system boardroom-note boardroom-note--live-only';
             const meta = document.createElement('div');
             meta.className = 'boardroom-note__meta';
             const src = document.createElement('span');
             src.className = 'boardroom-note__source';
-            src.textContent = 'Boardroom';
+            src.textContent = `Boardroom · ${LIVE_ONLY_TITLE}`;
             const time = document.createElement('time');
             time.className = 'boardroom-note__time';
-            time.textContent = this.app._formatNow();
             meta.append(src, time);
             const body = document.createElement('div');
             body.className = 'boardroom-note__text';
-            body.textContent = LIVE_ONLY_BANNER;
-            banner.append(meta, body);
-            messagesEl.parentNode.insertBefore(banner, messagesEl);
-            this.liveOnlyBanner = banner;
+            body.setAttribute('role', 'status');
+            // The retry line counts down; it is outside the live region.
+            const retry = document.createElement('div');
+            retry.className = 'boardroom-note__retry';
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'boardroom-note__retry-now';
+            button.textContent = RETRY_NOW_LABEL;
+            button.addEventListener('click', () => this.retryNow());
+            el.append(meta, body, retry, button);
+            messagesEl.parentNode.insertBefore(el, messagesEl);
+            this.liveOnlyBanner = el;
         }
-        this.liveOnlyBanner.dataset.reason = String(state.live_only_reason || '');
+        this.bannerState = state;
+        const el = this.liveOnlyBanner;
+        el.querySelector('.boardroom-note__time').textContent = this.app._formatNow();
+        const text = `${banner.causeText} ${banner.affectsText}`;
+        const body = el.querySelector('.boardroom-note__text');
+        if (body.textContent !== text) body.textContent = text;
+        el.dataset.cause = banner.cause || '';
+        el.dataset.reason = String(state?.live_only_reason || '');
+        this.scheduleRetry(banner);
+        this.renderRetry();
+    }
+
+    clearLiveOnly() {
+        clearTimeout(this.retryTimer);
+        clearInterval(this.retryTicker);
+        this.retryTimer = null;
+        this.retryTicker = null;
+        this.pageRetryAt = null;
+        this.bannerState = null;
+        this.liveOnlyBanner?.remove();
+        this.liveOnlyBanner = null;
+    }
+
+    /** Re-read history on the server's schedule, or the page's own. */
+    scheduleRetry(banner) {
+        clearTimeout(this.retryTimer);
+        const delay = autoRetryDelay(banner);
+        this.pageRetryAt = banner.nextRetryAt == null ? Date.now() + delay : null;
+        this.retryTimer = setTimeout(() => this.retryNow(), delay);
+        if (!this.retryTicker) this.retryTicker = setInterval(() => this.renderRetry(), 1000);
+    }
+
+    renderRetry() {
+        const el = this.liveOnlyBanner;
+        if (!el) return;
+        const banner = memoryBanner(this.bannerState);
+        if (!banner) return;
+        const line = [banner.retryText, pageRetryText(banner, this.pageRetryAt)].filter(Boolean).join(' ');
+        el.querySelector('.boardroom-note__retry').textContent = line;
+    }
+
+    /** "Retry now" (or a scheduled retry): a hydrate that asks for history again. */
+    async retryNow() {
+        clearTimeout(this.retryTimer);
+        this.retryTimer = null;
+        const button = this.liveOnlyBanner?.querySelector('.boardroom-note__retry-now');
+        if (button) button.disabled = true;
+        try {
+            await this.app.aguiSession?.hydrate({ retryHistory: true });
+        } finally {
+            if (button) button.disabled = false;
+            // A skipped re-read (a turn was running) is tried again later.
+            if (this.liveOnlyBanner && !this.retryTimer) {
+                const banner = memoryBanner(this.bannerState);
+                if (banner) this.scheduleRetry(banner);
+            }
+        }
+    }
+
+    /** "No history yet" reads differently from "history could not be read". */
+    setEmptyState(state) {
+        const emptyState = this.app.elements?.messagesContainer?.querySelector('.chatroom-empty-state');
+        if (!emptyState) return;
+        const target = emptyState.querySelector('p') || emptyState;
+        if (this.emptyStateText == null) this.emptyStateText = target.textContent;
+        const report = memoryReport(state);
+        if (!report) return;
+        if (historyEmpty(state)) target.textContent = HISTORY_EMPTY_TEXT;
+        else if (report.status === 'unavailable') target.textContent = HISTORY_UNAVAILABLE_EMPTY_TEXT;
+        else target.textContent = this.emptyStateText;
     }
 
     /**
