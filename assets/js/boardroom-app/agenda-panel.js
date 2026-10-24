@@ -38,7 +38,8 @@ import {
     vetoReason,
 } from './agenda-model.js';
 
-// Re-render the windows left while the panel is open.
+// Refresh the windows left while the panel is open (in place, so a veto
+// reason being typed is kept).
 const TICK_MS = 60 * 1000;
 
 function el(tag, className, textValue) {
@@ -83,7 +84,7 @@ export class AgendaPanel {
         this.ensureRoot();
         this.root.hidden = false;
         this.app.querySelector('[data-boardroom-agenda-toggle]')?.setAttribute('aria-expanded', 'true');
-        if (!this.timer) this.timer = setInterval(() => this.render(), TICK_MS);
+        if (!this.timer) this.timer = setInterval(() => this.tick(), TICK_MS);
         await this.load();
     }
 
@@ -199,6 +200,20 @@ export class AgendaPanel {
         );
     }
 
+    /** Update each window left in place; drop a veto form once its window closes. */
+    tick() {
+        if (!this.bodyEl || !this.view?.enabled) return;
+        const nowMs = this.now();
+        this.view.decisions.forEach((d) => {
+            const li = [...this.bodyEl.querySelectorAll('.boardroom-agenda__decision')]
+                .find((node) => node.dataset.item === d.item);
+            if (!li) return;
+            const windowEl = li.querySelector('.boardroom-agenda__window');
+            if (windowEl) windowEl.textContent = formatWindowLeft(vetoWindowLeftMs(d, nowMs, this.view.vetoWindowHours));
+            if (!canVeto(d, nowMs, this.view.vetoWindowHours)) li.querySelector('.boardroom-agenda__veto')?.remove();
+        });
+    }
+
     renderDecision(d, nowMs) {
         const li = el('li', 'boardroom-agenda__decision');
         li.dataset.status = d.status;
@@ -218,7 +233,9 @@ export class AgendaPanel {
             ['Status', AGENDA_STATUS_LABELS[d.status] || d.status],
             ['Veto window', formatWindowLeft(left)],
         ].forEach(([label, value]) => {
-            fields.append(el('dt', 'boardroom-agenda__label', label), el('dd', 'boardroom-agenda__value', value || '—'));
+            const valueEl = el('dd', 'boardroom-agenda__value', value || '—');
+            if (label === 'Veto window') valueEl.classList.add('boardroom-agenda__window');
+            fields.append(el('dt', 'boardroom-agenda__label', label), valueEl);
         });
         li.appendChild(fields);
 
