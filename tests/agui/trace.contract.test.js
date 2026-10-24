@@ -132,6 +132,26 @@ describe('client: trace frames are the board\'s work, not speech', () => {
     assert.deepEqual(errors, []);
   });
 
+  test('every run, an aborted one included, is closed once (no turn left "in session")', async () => {
+    serve([
+      { type: 'RUN_STARTED', threadId: '{{threadId}}', runId: '{{runId}}' },
+      { type: 'RUN_FINISHED', threadId: '{{threadId}}', runId: '{{runId}}' },
+    ]);
+    const client = new CopilotKitClient({ runtimeUrl: '/ag-ui', threadId: 'boardroom:acme' });
+    const closed = [];
+    client.onRunClosed = (runId, source) => closed.push(source);
+    await client.sendMessage('Hi');
+    await client.hydrate();
+    globalThis.fetch = async (url, init) => new Promise((resolve, reject) => {
+      if (init.signal.aborted) reject(new DOMException('aborted', 'AbortError'));
+      init.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+    });
+    const pending = client.sendMessage('Hi again').catch((e) => e.name);
+    client.abort();
+    assert.equal(await pending, 'AbortError');
+    assert.deepEqual(closed, ['agui', 'hydrate', 'agui']);
+  });
+
   test('traceEntryOf tells a trace frame from an Evt frame', () => {
     assert.equal(traceEntryOf({ type: 'RUN_STARTED' }), undefined);
     assert.equal(traceEntryOf({ type: 'CUSTOM', name: 'resolution', value: {} }), undefined);

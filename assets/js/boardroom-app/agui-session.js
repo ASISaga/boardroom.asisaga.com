@@ -141,6 +141,11 @@ export class AguiSession {
             if (raw?.phase !== 'idle') this.app.chatLog.markDeliberated(runId, source);
         };
         this.app.copilotKit.onActivity = () => this.app.traceView.onActivity();
+        // Every run ends here, aborted ones too: no turn is left "in session".
+        this.app.copilotKit.onRunClosed = (runId, source) => {
+            this.app.traceView.onRunEnded(runId, source);
+            this.app.chatLog.gate.forget(runId);
+        };
         this.app.copilotKit.onCustomEvent = (name, value) => this.handleBoardroomEvent(name, value);
         this.app.copilotKit.onStateChange = (state) => {
             // A hydrate's snapshot always says whether mind answered; a turn's

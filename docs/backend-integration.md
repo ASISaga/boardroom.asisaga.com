@@ -489,6 +489,65 @@ Owner view (`boardroom.agenda.owner_view.v1`). It reads the `agenda`,
 - Titles, decisions and reasons are untrusted CXO text. The panel sets them
   as `textContent` only, never as HTML.
 
+### The board's work: the turn trace (visible board, step 4)
+
+The page shows what the board is doing from the turn trace that
+boardroom-orchestration fixed in step 1 (`boardroom.trace.v1`,
+`docs/turn-trace.md` in that repository): a status strip, one timeline per
+turn, failure cards, and an operator view. Trace entries carry counts,
+sizes, durations, handles and cause classes only; speech is shown as
+before. Everything is rendered with `textContent`.
+
+**What the page reads (live).** A trace entry may arrive on the AG-UI
+stream either as `CUSTOM` `name: "boardroom_trace"`, `value: <entry>`, or
+as a bare `data:` frame with `schema: "boardroom.trace.v1"` and no `type`
+(step 1's wire). `CopilotKitClient` hands both to `onTraceEntry`; neither is
+speech, a custom event or a log line. Heartbeats (`live: true`, `n: null`)
+replace each other and drive the wait countdown (`details.wait_remaining_s`,
+measured from arrival). Any bytes of the stream, keepalives included, count
+as activity.
+
+**What the page reads (hydrate), proposed to the Function App (step 3):**
+
+| `STATE_SNAPSHOT` key | Shape | Used for |
+|---|---|---|
+| `turn_traces` | `[{turn_id, entries: [...], trace_unavailable?}]` | timelines after a reload |
+| `memory` | `{status: ok\|empty\|unavailable, cause, affects: [history, grounding], retrying, next_retry_at}` | the memory banner |
+| `board_status` | `{running, reason, next_scheduled}` | the idle line |
+| `trace_audience` | `"operator"` when the server serves operator entries | the operator view |
+
+An older backend that sends only `live_only` / `live_only_reason` still gets
+a banner; what it does not say is shown as "not reported". "Retry now"
+(and the page's own re-read, on the server's `next_retry_at` or every
+minute) is a hydrate with `forwardedProps.retry_history: true`.
+
+**Audiences.** The page never asks for an audience: the Function App
+decides which entries reach a session (step 1's `x-boardroom-trace` header
+is set by the server). `GET /auth/status` `capabilities.operate` (proposed)
+or the hydrate's `trace_audience: "operator"` turn on the operator view
+(technical detail of every phase, the failure card's attempts and waits,
+prompt size, "Copy trace"). An owner session keeps owner entries only: any
+operator entry that arrives anyway is dropped unrendered and logged once as
+a server fault.
+
+**Gaps are marked, never guessed.** A turn whose speech arrived with no
+trace says "Trace unavailable"; an entry the page cannot read is counted,
+not rendered; `skipped` + `details.not_reported` reads "not reported"; on an
+operator stream a gap in `n` is listed as missing. "Heard nothing for N s"
+appears after 5 s without an event while a run is open (the contract's
+interval); after 15 s with no bytes at all, the strip says the connection
+may be broken, and when the browser is offline it says so.
+
+**Log panel.** A run with no deliberation (a page load, an empty run) is
+one idle line, not "Run started / State snapshot / Run finished". The
+board's lines are labelled by turn and honour the level selector. MSAL
+lines go to a separate, collapsed "Browser library log", off by default.
+
+Models (DOM-free, tested in `tests/agui/trace.contract.test.js`):
+`trace-model.js`, `board-status-model.js`, `memory-banner-model.js`,
+`client-log-model.js`. Views: `trace-view.js` (strip and timelines),
+`run-status.js` (banner), `chat-log.js` (log panel).
+
 ## Client module layout
 
 The two entry points keep their paths and public APIs; their logic lives in
@@ -501,9 +560,12 @@ small classes beside them.
 - `assets/js/boardroom-app-new.js` — `<boardroom-app>` (`BoardroomApp`,
   lifecycle and public API). Collaborators in `assets/js/boardroom-app/`,
   each constructed with the app element: `MsalAuth`, `AuthChecklist`,
-  `AuthGate`, `AguiSession`, `RunStatus`, `MessageView`, `MembersPanel`,
-  `ChatLog`, `BoardroomChrome`, `AgendaPanel` (with the DOM-free
-  `agenda-model.js`); shared values in `constants.js`.
+  `AuthGate`, `AguiSession`, `RunStatus`, `TraceView`, `MessageView`,
+  `MembersPanel`, `ChatLog`, `BoardroomChrome`, `AgendaPanel` (with the
+  DOM-free `agenda-model.js`; `TraceView`, `RunStatus` and `ChatLog` use the
+  DOM-free `trace-model.js`, `board-status-model.js`,
+  `memory-banner-model.js` and `client-log-model.js`); shared values in
+  `constants.js`.
 
 ## Rate Limiting
 

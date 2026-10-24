@@ -116,6 +116,7 @@ export class CopilotKitClient {
     this.onProtocolEvent = null; // (event, runId, source) => void  (every AG-UI event received)
     this.onTraceEntry = null;    // (rawEntry, runId, source) => void  (boardroom.trace.v1, unvalidated)
     this.onActivity = null;      // (runId, source) => void  (any bytes of a run's stream, keepalives included)
+    this.onRunClosed = null;     // (runId, source) => void  (every run, once, aborted ones included)
     this.onCustomEvent = null;   // (name, value, runId) => void
     this.onRunResult = null;     // (result, runId) => void  (any RUN_FINISHED.result, may be undefined)
     this.onTurnComplete = null;  // (digest, runId) => void  (Digest-bearing RUN_FINISHED only)
@@ -379,6 +380,7 @@ export class CopilotKitClient {
     } finally {
       run.finished = true;
       this._runs.delete(run.runId);
+      this._fireRunClosed(run);
     }
   }
 
@@ -417,6 +419,7 @@ export class CopilotKitClient {
     } finally {
       run.finished = true;
       this._runs.delete(run.runId);
+      this._fireRunClosed(run);
     }
   }
 
@@ -479,6 +482,16 @@ export class CopilotKitClient {
     const err = run.fail({ message, code });
     if (this.onError) {
       this.onError(err, run.runId);
+    }
+  }
+
+  /** Every run ends here once, aborted or not, after its terminal callback. */
+  _fireRunClosed(run) {
+    if (!this.onRunClosed) return;
+    try {
+      this.onRunClosed(run.runId, run.source);
+    } catch (hookError) {
+      console.debug('[CopilotKit] onRunClosed failed:', hookError);
     }
   }
 

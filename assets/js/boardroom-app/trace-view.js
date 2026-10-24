@@ -346,10 +346,22 @@ export class TraceView {
         section.dataset.status = timeline.status;
 
         const prior = section.querySelector('.boardroom-turn__details');
+        // Re-rendering (every tick of a running turn) keeps open panels open and focus in place.
+        const openKeys = new Set([...section.querySelectorAll('details[data-key]')]
+            .filter((d) => d.open).map((d) => d.dataset.key));
+        const focused = typeof document !== 'undefined' && section.contains(document.activeElement)
+            ? document.activeElement.closest('[data-key]')?.dataset.key : null;
         const details = el('details', 'boardroom-turn__details');
         details.open = prior ? prior.open : true;
         details.append(this.headerEl(timeline), ...this.bodyEls(turn, timeline, now));
+        for (const d of details.querySelectorAll('details[data-key]')) {
+            if (openKeys.has(d.dataset.key)) d.open = true;
+        }
         section.replaceChildren(details);
+        if (focused) {
+            const target = section.querySelector(`[data-key="${focused}"]`);
+            (target?.matches('details') ? target.querySelector('summary') : target)?.focus();
+        }
 
         this.place(section, turnId, anchorIds);
         this.hideRepeats(turnId, timeline);
@@ -467,6 +479,7 @@ export class TraceView {
             const lines = detailLines({ ...row.details, ...(row.cause ? { cause: row.cause } : {}), ...(row.next ? { next: row.next } : {}) });
             if (lines.length) {
                 const d = el('details', 'boardroom-turn__detail');
+                d.dataset.key = `phase-${row.agent}-${row.first}`;
                 d.append(el('summary', 'boardroom-turn__detail-toggle', 'Technical detail'), el('pre', 'boardroom-turn__detail-text', lines.join('\n')));
                 li.appendChild(d);
             }
@@ -496,6 +509,7 @@ export class TraceView {
             if (d.elapsedS != null) lines.push(`Elapsed: ${formatDuration(d.elapsedS)}${d.budgetS != null ? ` of a ${formatDuration(d.budgetS)} budget` : ''}`);
             if (d.errorType) lines.push(`Error type: ${d.errorType}`);
             const details = el('details', 'boardroom-failure__detail');
+            details.dataset.key = `failure-${card.agent}`;
             details.append(el('summary', 'boardroom-failure__detail-toggle', 'Technical detail'), el('pre', 'boardroom-failure__detail-text', lines.join('\n')));
             box.appendChild(details);
         }
@@ -505,6 +519,7 @@ export class TraceView {
     copyEl(turn) {
         const button = el('button', 'boardroom-turn__copy', TRACE_COPY_LABEL);
         button.type = 'button';
+        button.dataset.key = 'copy';
         button.addEventListener('click', async () => {
             const text = traceText(turn, { operator: this.operator });
             if (!text) return;
