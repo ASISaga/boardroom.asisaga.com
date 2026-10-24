@@ -53,10 +53,13 @@
  * - AuthChecklist (auth-checklist.js): sign-in checklist UI, admin consent
  * - AuthGate (auth-gate.js): /auth/status, capabilities, 401/403 handling
  * - AguiSession (agui-session.js): CopilotKitClient wiring, hydrate, send
- * - RunStatus (run-status.js): busy, deliberating, interjection, live-only
+ * - RunStatus (run-status.js): busy, deliberating, interjection, memory banner
+ * - TraceView (trace-view.js): the board's work (status strip, per-turn
+ *   timelines, failure cards, operator detail) from the turn trace
  * - MessageView (message-view.js): streamed bubbles, speaker relay panel
  * - MembersPanel (members-panel.js): roster, selection, speaking member
- * - ChatLog (chat-log.js): system notes, log level, protocol event log
+ * - ChatLog (chat-log.js): system notes, log level, the board's event log
+ *   by turn, and the separate browser-library (MSAL) log
  * - BoardroomChrome (boardroom-chrome.js): header/toolbar buttons, files
  * - AgendaPanel (agenda-panel.js): owner's agenda view, consent digest, veto
  */
@@ -72,6 +75,7 @@ import { MembersPanel } from './boardroom-app/members-panel.js';
 import { BoardroomChrome } from './boardroom-app/boardroom-chrome.js';
 import { AguiSession } from './boardroom-app/agui-session.js';
 import { AgendaPanel } from './boardroom-app/agenda-panel.js';
+import { TraceView } from './boardroom-app/trace-view.js';
 
 class BoardroomApp extends ChatroomApp {
     constructor() {
@@ -103,7 +107,7 @@ class BoardroomApp extends ChatroomApp {
         // capabilities it grants. Admin controls stay hidden until
         // `administer` is true.
         this.authStatus = null;
-        this.capabilities = { participate: false, administer: false };
+        this.capabilities = { participate: false, administer: false, operate: false };
 
         // Collaborators (assets/js/boardroom-app/). MsalAuth holds the MSAL
         // PublicClientApplication and signed-in account, set up in
@@ -114,6 +118,7 @@ class BoardroomApp extends ChatroomApp {
         this.authChecklist = new AuthChecklist(this);
         this.authGate = new AuthGate(this);
         this.runStatus = new RunStatus(this);
+        this.traceView = new TraceView(this);
         this.messageView = new MessageView(this);
         this.membersPanel = new MembersPanel(this);
         this.boardroomChrome = new BoardroomChrome(this);
@@ -155,6 +160,7 @@ class BoardroomApp extends ChatroomApp {
         // _onInputBuilt hooks above against the already-static shell.
         await super.connectedCallback();
         this.chatLog.buildControl();
+        this.traceView.buildStrip();
 
         // Hide the initial loading overlay now that hydration has run —
         // it's no longer tied to a live connection at this stage. Without this,
@@ -324,6 +330,8 @@ class BoardroomApp extends ChatroomApp {
             this.aguiSession.onPageHide = null;
         }
         this.runStatus.clearInterjection();
+        this.runStatus.clearLiveOnly();
+        this.traceView.close();
         this.agendaPanel.close();
         super.disconnectedCallback();
         this.dispatchEvent(new CustomEvent('boardroom-disconnected', { bubbles: true }));

@@ -60,8 +60,25 @@ export const INTERJECTION_STATUS_TIMEOUT_MS = 90 * 1000;
 // so a long first LLM call is not a blank screen.
 export const DELIBERATING_STATUS = 'The board is deliberating…';
 // Spec 03 "serve live-only" error surface: the hydrate's STATE_SNAPSHOT has
-// live_only: true when the board's memory (mind) is unreachable.
-export const LIVE_ONLY_BANNER = 'Live-only: board memory unavailable — history and grounding are off.';
+// live_only: true (or memory.status "unavailable") when the board's memory
+// (mind) is unreachable. The banner's words come from memory-banner-model.js.
+export const LIVE_ONLY_TITLE = 'Live-only';
+
+// The memory banner's "Retry now" re-reads history: a hydrate with
+// forwardedProps.retry_history (proposed to the Function App, step 3).
+export const HISTORY_RETRY_PROP = 'retry_history';
+
+/**
+ * The board's work (visible board, step 4; issue #75): the operator view
+ * switch, "Copy trace", and the separate client-library log (MSAL lines,
+ * off by default).
+ */
+export const TRACE_OPERATOR_VIEW_LABEL = 'Operator detail';
+export const TRACE_COPY_LABEL = 'Copy trace';
+export const TRACE_COPIED = 'Trace copied (no company content)';
+export const TRACE_COPY_FAILED = 'The trace could not be copied';
+export const CLIENT_LOG_SUMMARY = 'Browser library log (MSAL)';
+export const CLIENT_LOG_SHOW_LABEL = 'Show browser library lines';
 
 // The backend mints the boardroom thread id (it replaces the client's
 // threadId and returns the real one in RUN_STARTED.threadId); this
@@ -96,6 +113,7 @@ export const AUTH_CHECK_LABELS = {
 
 export const NOTE_SOURCES = {
     deliberating: 'Boardroom',
+    idle: 'Boardroom',
     interjection: 'Boardroom',
     'event-error': 'Boardroom backend',
     'unregistered-organization': 'Boardroom auth',

@@ -1,0 +1,929 @@
+{
+ "_comment": "Turn traces in the boardroom.trace.v1 shape fixed by boardroom-orchestration step 1 (ASISaga/boardroom-orchestration#110). rate_limited_turn is step 1's own whole-turn example (operator stream, 24 October situation, waits scaled down); two_speaker_turn is built by hand in the same shape; idle_entry is an idle report.",
+ "rate_limited_turn": [
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "fcdc2529-639d-4a10-8516-e28302ce5bbf",
+   "n": 1,
+   "agent": "board",
+   "phase": "turn_opened",
+   "state": "started",
+   "started_at": "2026-10-24T15:04:01.408Z",
+   "duration_s": null,
+   "summary": "A turn opened on your message. In the room: the founder (chair), the CFO, the CMO.",
+   "details": {
+    "trigger": "user_message",
+    "agenda_item": null,
+    "title": null,
+    "roster": [
+     "founder",
+     "cfo",
+     "cmo"
+    ],
+    "max_rounds": 3
+   },
+   "audience": "owner",
+   "source": "board"
+  },
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "fcdc2529-639d-4a10-8516-e28302ce5bbf",
+   "n": 2,
+   "agent": "board",
+   "phase": "memory_read",
+   "state": "finished",
+   "started_at": "2026-10-24T15:04:01.408Z",
+   "duration_s": 0.0,
+   "summary": "Read the company's memory: profile absent, board absent, 0 recent closing record(s).",
+   "details": {
+    "rows": [
+     "profile",
+     "board",
+     "turn:"
+    ],
+    "profile": false,
+    "board": false,
+    "records": 0,
+    "failed_reads": 0
+   },
+   "audience": "operator",
+   "source": "board"
+  },
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "fcdc2529-639d-4a10-8516-e28302ce5bbf",
+   "n": 3,
+   "agent": "founder",
+   "phase": "routing",
+   "state": "started",
+   "started_at": "2026-10-24T15:04:01.409Z",
+   "duration_s": null,
+   "summary": "The founder is choosing who speaks next.",
+   "details": {},
+   "audience": "owner",
+   "source": "board"
+  },
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "fcdc2529-639d-4a10-8516-e28302ce5bbf",
+   "n": 4,
+   "agent": "founder",
+   "phase": "model_call",
+   "state": "started",
+   "started_at": "2026-10-24T15:04:01.419Z",
+   "duration_s": null,
+   "summary": "The founder sent model request 1 of this turn.",
+   "details": {
+    "request": 1,
+    "rate_limited_so_far": 0,
+    "budget_s": 60,
+    "elapsed_s": 0.0
+   },
+   "audience": "operator",
+   "source": "bridge"
+  },
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "fcdc2529-639d-4a10-8516-e28302ce5bbf",
+   "n": 5,
+   "agent": "founder",
+   "phase": "memory_read",
+   "state": "skipped",
+   "started_at": "2026-10-24T15:04:01.419Z",
+   "duration_s": null,
+   "summary": "Not reported: the founder's memory read (the agent does not report this phase yet).",
+   "details": {
+    "not_reported": true
+   },
+   "audience": "operator",
+   "source": "board"
+  },
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "fcdc2529-639d-4a10-8516-e28302ce5bbf",
+   "n": 6,
+   "agent": "founder",
+   "phase": "context_built",
+   "state": "skipped",
+   "started_at": "2026-10-24T15:04:01.419Z",
+   "duration_s": null,
+   "summary": "Not reported: the founder's context built (the agent does not report this phase yet).",
+   "details": {
+    "not_reported": true
+   },
+   "audience": "operator",
+   "source": "board"
+  },
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "fcdc2529-639d-4a10-8516-e28302ce5bbf",
+   "n": 7,
+   "agent": "founder",
+   "phase": "write_back",
+   "state": "skipped",
+   "started_at": "2026-10-24T15:04:01.419Z",
+   "duration_s": null,
+   "summary": "Not reported: the founder's write back (the agent does not report this phase yet).",
+   "details": {
+    "not_reported": true
+   },
+   "audience": "operator",
+   "source": "board"
+  },
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "fcdc2529-639d-4a10-8516-e28302ce5bbf",
+   "n": 8,
+   "agent": "founder",
+   "phase": "routing",
+   "state": "finished",
+   "started_at": "2026-10-24T15:04:01.419Z",
+   "duration_s": 0.01,
+   "summary": "The founder chose the CFO to speak next: Deliberation has just started",
+   "details": {
+    "by": "founder",
+    "next_speaker": "cfo",
+    "reason": "Deliberation has just started",
+    "round_index": 1,
+    "terminate": false
+   },
+   "audience": "owner",
+   "source": "board"
+  },
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "fcdc2529-639d-4a10-8516-e28302ce5bbf",
+   "n": null,
+   "agent": "board",
+   "phase": "turn_opened",
+   "state": "progress",
+   "started_at": "2026-10-24T15:04:01.420Z",
+   "duration_s": 0.012,
+   "summary": "The board is working (0 s into the turn).",
+   "details": {
+    "elapsed_s": 0.012,
+    "stage": "deliberate",
+    "waiting_for": "board"
+   },
+   "audience": "owner",
+   "source": "board",
+   "live": true,
+   "after": 8
+  },
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "fcdc2529-639d-4a10-8516-e28302ce5bbf",
+   "n": 9,
+   "agent": "cfo",
+   "phase": "model_call",
+   "state": "started",
+   "started_at": "2026-10-24T15:04:01.430Z",
+   "duration_s": null,
+   "summary": "The CFO sent model request 1 of this turn.",
+   "details": {
+    "request": 1,
+    "rate_limited_so_far": 0,
+    "budget_s": 60,
+    "elapsed_s": 0.0
+   },
+   "audience": "operator",
+   "source": "bridge"
+  },
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "fcdc2529-639d-4a10-8516-e28302ce5bbf",
+   "n": 10,
+   "agent": "cfo",
+   "phase": "model_call",
+   "state": "failed",
+   "started_at": "2026-10-24T15:04:01.430Z",
+   "duration_s": null,
+   "summary": "Model request 1 from the CFO was rate-limited; the model asks for a 0 s wait.",
+   "details": {
+    "request": 1,
+    "rate_limited": true,
+    "retry_after_s": 0.3,
+    "wait_ends_at": "2026-10-24T15:04:01.730Z",
+    "error_type": "RateLimitError"
+   },
+   "audience": "operator",
+   "source": "bridge",
+   "cause": "rate_limited",
+   "next": "retry"
+  },
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "fcdc2529-639d-4a10-8516-e28302ce5bbf",
+   "n": null,
+   "agent": "cfo",
+   "phase": "model_call",
+   "state": "progress",
+   "started_at": "2026-10-24T15:04:01.531Z",
+   "duration_s": 0.123,
+   "summary": "The CFO is waiting out the model's rate limit: 0 s wait, 0 s left, ends at 15:04:01 UTC (0 s into its turn).",
+   "details": {
+    "elapsed_s": 0.123,
+    "stage": "deliberate",
+    "speaker": "cfo",
+    "speaker_elapsed_s": 0.101,
+    "model_requests": 1,
+    "rate_limited": 1,
+    "waiting_for": "rate_limit",
+    "wait_s": 0.3,
+    "wait_remaining_s": 0.199,
+    "wait_ends_at": "2026-10-24T15:04:01.730Z"
+   },
+   "audience": "owner",
+   "source": "board",
+   "live": true,
+   "after": 10
+  },
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "fcdc2529-639d-4a10-8516-e28302ce5bbf",
+   "n": null,
+   "agent": "cfo",
+   "phase": "model_call",
+   "state": "progress",
+   "started_at": "2026-10-24T15:04:01.632Z",
+   "duration_s": 0.224,
+   "summary": "The CFO is waiting out the model's rate limit: 0 s wait, 0 s left, ends at 15:04:01 UTC (0 s into its turn).",
+   "details": {
+    "elapsed_s": 0.224,
+    "stage": "deliberate",
+    "speaker": "cfo",
+    "speaker_elapsed_s": 0.202,
+    "model_requests": 1,
+    "rate_limited": 1,
+    "waiting_for": "rate_limit",
+    "wait_s": 0.3,
+    "wait_remaining_s": 0.098,
+    "wait_ends_at": "2026-10-24T15:04:01.730Z"
+   },
+   "audience": "owner",
+   "source": "board",
+   "live": true,
+   "after": 10
+  },
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "fcdc2529-639d-4a10-8516-e28302ce5bbf",
+   "n": 11,
+   "agent": "cfo",
+   "phase": "model_call",
+   "state": "finished",
+   "started_at": "2026-10-24T15:04:01.730Z",
+   "duration_s": 0.3,
+   "summary": "The CFO waited 0 s out a rate limit before its next model request.",
+   "details": {
+    "wait": 1,
+    "wait_s": 0.3,
+    "retry_after_s": 0.3
+   },
+   "audience": "operator",
+   "source": "bridge"
+  },
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "fcdc2529-639d-4a10-8516-e28302ce5bbf",
+   "n": 12,
+   "agent": "cfo",
+   "phase": "model_call",
+   "state": "started",
+   "started_at": "2026-10-24T15:04:01.730Z",
+   "duration_s": null,
+   "summary": "The CFO sent model request 2 of this turn.",
+   "details": {
+    "request": 2,
+    "rate_limited_so_far": 1,
+    "budget_s": 60,
+    "elapsed_s": 0.301
+   },
+   "audience": "operator",
+   "source": "bridge"
+  },
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "fcdc2529-639d-4a10-8516-e28302ce5bbf",
+   "n": 13,
+   "agent": "cfo",
+   "phase": "model_call",
+   "state": "failed",
+   "started_at": "2026-10-24T15:04:01.730Z",
+   "duration_s": null,
+   "summary": "Model request 2 from the CFO was rate-limited; the model asks for a 0 s wait.",
+   "details": {
+    "request": 2,
+    "rate_limited": true,
+    "retry_after_s": 0.3,
+    "wait_ends_at": "2026-10-24T15:04:02.030Z",
+    "error_type": "RateLimitError"
+   },
+   "audience": "operator",
+   "source": "bridge",
+   "cause": "rate_limited",
+   "next": "retry"
+  },
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "fcdc2529-639d-4a10-8516-e28302ce5bbf",
+   "n": null,
+   "agent": "cfo",
+   "phase": "model_call",
+   "state": "progress",
+   "started_at": "2026-10-24T15:04:01.832Z",
+   "duration_s": 0.424,
+   "summary": "The CFO is waiting out the model's rate limit: 0 s wait, 0 s left, ends at 15:04:02 UTC (0 s into its turn).",
+   "details": {
+    "elapsed_s": 0.424,
+    "stage": "deliberate",
+    "speaker": "cfo",
+    "speaker_elapsed_s": 0.402,
+    "model_requests": 2,
+    "rate_limited": 2,
+    "waiting_for": "rate_limit",
+    "wait_s": 0.3,
+    "wait_remaining_s": 0.199,
+    "wait_ends_at": "2026-10-24T15:04:02.030Z"
+   },
+   "audience": "owner",
+   "source": "board",
+   "live": true,
+   "after": 13
+  },
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "fcdc2529-639d-4a10-8516-e28302ce5bbf",
+   "n": null,
+   "agent": "cfo",
+   "phase": "model_call",
+   "state": "progress",
+   "started_at": "2026-10-24T15:04:01.933Z",
+   "duration_s": 0.525,
+   "summary": "The CFO is waiting out the model's rate limit: 0 s wait, 0 s left, ends at 15:04:02 UTC (1 s into its turn).",
+   "details": {
+    "elapsed_s": 0.525,
+    "stage": "deliberate",
+    "speaker": "cfo",
+    "speaker_elapsed_s": 0.503,
+    "model_requests": 2,
+    "rate_limited": 2,
+    "waiting_for": "rate_limit",
+    "wait_s": 0.3,
+    "wait_remaining_s": 0.098,
+    "wait_ends_at": "2026-10-24T15:04:02.030Z"
+   },
+   "audience": "owner",
+   "source": "board",
+   "live": true,
+   "after": 13
+  },
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "fcdc2529-639d-4a10-8516-e28302ce5bbf",
+   "n": 14,
+   "agent": "cfo",
+   "phase": "model_call",
+   "state": "finished",
+   "started_at": "2026-10-24T15:04:02.031Z",
+   "duration_s": 0.301,
+   "summary": "The CFO waited 0 s out a rate limit before its next model request.",
+   "details": {
+    "wait": 2,
+    "wait_s": 0.301,
+    "retry_after_s": 0.3
+   },
+   "audience": "operator",
+   "source": "bridge"
+  },
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "fcdc2529-639d-4a10-8516-e28302ce5bbf",
+   "n": 15,
+   "agent": "cfo",
+   "phase": "model_call",
+   "state": "started",
+   "started_at": "2026-10-24T15:04:02.031Z",
+   "duration_s": null,
+   "summary": "The CFO sent model request 3 of this turn.",
+   "details": {
+    "request": 3,
+    "rate_limited_so_far": 2,
+    "budget_s": 60,
+    "elapsed_s": 0.601
+   },
+   "audience": "operator",
+   "source": "bridge"
+  },
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "fcdc2529-639d-4a10-8516-e28302ce5bbf",
+   "n": 16,
+   "agent": "cfo",
+   "phase": "model_call",
+   "state": "failed",
+   "started_at": "2026-10-24T15:04:02.031Z",
+   "duration_s": null,
+   "summary": "Model request 3 from the CFO was rate-limited; the model asks for a 0 s wait.",
+   "details": {
+    "request": 3,
+    "rate_limited": true,
+    "retry_after_s": 0.3,
+    "wait_ends_at": "2026-10-24T15:04:02.331Z",
+    "error_type": "RateLimitError"
+   },
+   "audience": "operator",
+   "source": "bridge",
+   "cause": "rate_limited",
+   "next": "retry"
+  },
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "fcdc2529-639d-4a10-8516-e28302ce5bbf",
+   "n": 17,
+   "agent": "cfo",
+   "phase": "memory_read",
+   "state": "skipped",
+   "started_at": "2026-10-24T15:04:02.031Z",
+   "duration_s": null,
+   "summary": "Not reported: the CFO's memory read (the agent does not report this phase yet).",
+   "details": {
+    "not_reported": true
+   },
+   "audience": "operator",
+   "source": "board"
+  },
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "fcdc2529-639d-4a10-8516-e28302ce5bbf",
+   "n": 18,
+   "agent": "cfo",
+   "phase": "context_built",
+   "state": "skipped",
+   "started_at": "2026-10-24T15:04:02.031Z",
+   "duration_s": null,
+   "summary": "Not reported: the CFO's context built (the agent does not report this phase yet).",
+   "details": {
+    "not_reported": true
+   },
+   "audience": "operator",
+   "source": "board"
+  },
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "fcdc2529-639d-4a10-8516-e28302ce5bbf",
+   "n": 19,
+   "agent": "cfo",
+   "phase": "write_back",
+   "state": "skipped",
+   "started_at": "2026-10-24T15:04:02.031Z",
+   "duration_s": null,
+   "summary": "Not reported: the CFO's write back (the agent does not report this phase yet).",
+   "details": {
+    "not_reported": true
+   },
+   "audience": "operator",
+   "source": "board"
+  },
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "fcdc2529-639d-4a10-8516-e28302ce5bbf",
+   "n": 20,
+   "agent": "cfo",
+   "phase": "outcome",
+   "state": "failed",
+   "started_at": "2026-10-24T15:04:01.430Z",
+   "duration_s": 0.601,
+   "summary": "The CFO could not answer: the model turned away 3 of its 3 request(s) under its rate limit, it waited 2 time(s), 1 s in all, and its time for this turn ran out. The board stopped here rather than send the next speaker to the same rate-limited model; sending your message again starts a new turn once the limit has passed.",
+   "details": {
+    "outcome": "failed",
+    "model_requests": 3,
+    "rate_limited": 3,
+    "wait_s": 0.601
+   },
+   "audience": "owner",
+   "source": "board",
+   "cause": "budget_exhausted",
+   "next": "stop"
+  },
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "fcdc2529-639d-4a10-8516-e28302ce5bbf",
+   "n": 21,
+   "agent": "cfo",
+   "phase": "outcome",
+   "state": "failed",
+   "started_at": "2026-10-24T15:04:01.430Z",
+   "duration_s": 0.601,
+   "summary": "cfo failed: budget_exhausted; 3 model request(s), 3 rate-limited (429), 2 wait(s) of 0.601 s, elapsed 0.601 s; next: stop.",
+   "details": {
+    "outcome": "failed",
+    "model_requests": 3,
+    "rate_limited": 3,
+    "waits": 2,
+    "wait_s": 0.601,
+    "budget_s": 60,
+    "bridge_outcome": "budget_exhausted",
+    "error_type": "RateLimitError",
+    "waits_s": [
+     0.3,
+     0.301
+    ],
+    "elapsed_s": 0.601
+   },
+   "audience": "operator",
+   "source": "board",
+   "cause": "budget_exhausted",
+   "next": "stop"
+  },
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "fcdc2529-639d-4a10-8516-e28302ce5bbf",
+   "n": 22,
+   "agent": "board",
+   "phase": "write_back",
+   "state": "finished",
+   "started_at": "2026-10-24T15:04:02.033Z",
+   "duration_s": 0.0,
+   "summary": "Saved the turn's transcript (1 line(s)).",
+   "details": {
+    "row": "transcript:",
+    "lines": 1,
+    "outcome": "turn_failed"
+   },
+   "audience": "operator",
+   "source": "board"
+  },
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "fcdc2529-639d-4a10-8516-e28302ce5bbf",
+   "n": 23,
+   "agent": "board",
+   "phase": "capacity",
+   "state": "skipped",
+   "started_at": "2026-10-24T15:04:02.033Z",
+   "duration_s": null,
+   "summary": "Not reported: tokens used this minute against the deployment's limit.",
+   "details": {
+    "not_reported": true
+   },
+   "audience": "operator",
+   "source": "board"
+  },
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "fcdc2529-639d-4a10-8516-e28302ce5bbf",
+   "n": 24,
+   "agent": "board",
+   "phase": "turn_closed",
+   "state": "failed",
+   "started_at": "2026-10-24T15:04:01.408Z",
+   "duration_s": 0.625,
+   "summary": "The turn closed because a speaker could not answer: 1 s, 0 speaker(s) spoke, 4 model request(s), 1 s waiting on rate limits.",
+   "details": {
+    "reason": "failed_speaker",
+    "speakers": 0,
+    "spoke": [],
+    "model_requests": 4,
+    "rate_limited": 3,
+    "wait_s": 0.601,
+    "entries": 24,
+    "dropped": 0,
+    "rejected_reports": 0,
+    "error_type": null
+   },
+   "audience": "owner",
+   "source": "board",
+   "cause": "budget_exhausted",
+   "next": "none"
+  }
+ ],
+ "two_speaker_turn": [
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "0b7c9d1e-2f3a-4b5c-8d6e-7f8091a2b3c4",
+   "n": 1,
+   "agent": "board",
+   "phase": "turn_opened",
+   "state": "started",
+   "started_at": "2026-10-24T09:00:00.000Z",
+   "duration_s": null,
+   "summary": "A turn opened on agenda item item.7. In the room: the founder (chair), the CFO, the CMO.",
+   "details": {
+    "trigger": "agenda_item",
+    "agenda_item": "item.7",
+    "title": "Pricing review",
+    "roster": [
+     "founder",
+     "cfo",
+     "cmo"
+    ],
+    "max_rounds": 3
+   },
+   "audience": "owner",
+   "source": "board"
+  },
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "0b7c9d1e-2f3a-4b5c-8d6e-7f8091a2b3c4",
+   "n": 2,
+   "agent": "founder",
+   "phase": "routing",
+   "state": "started",
+   "started_at": "2026-10-24T09:00:00.100Z",
+   "duration_s": null,
+   "summary": "The founder is choosing who speaks next.",
+   "details": {},
+   "audience": "owner",
+   "source": "board"
+  },
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "0b7c9d1e-2f3a-4b5c-8d6e-7f8091a2b3c4",
+   "n": 3,
+   "agent": "founder",
+   "phase": "routing",
+   "state": "finished",
+   "started_at": "2026-10-24T09:00:01.100Z",
+   "duration_s": 1.0,
+   "summary": "The founder chose the CFO to speak next: Costs first",
+   "details": {
+    "by": "founder",
+    "next_speaker": "cfo",
+    "reason": "Costs first",
+    "round_index": 1,
+    "terminate": false
+   },
+   "audience": "owner",
+   "source": "board"
+  },
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "0b7c9d1e-2f3a-4b5c-8d6e-7f8091a2b3c4",
+   "n": 4,
+   "agent": "cfo",
+   "phase": "memory_read",
+   "state": "finished",
+   "started_at": "2026-10-24T09:00:01.200Z",
+   "duration_s": 0.4,
+   "summary": "The CFO read 3 kinds of record (12 records).",
+   "details": {
+    "kinds": [
+     "commitments",
+     "positions",
+     "decisions"
+    ],
+    "records": 12,
+    "failed_reads": 0
+   },
+   "audience": "operator",
+   "source": "agent"
+  },
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "0b7c9d1e-2f3a-4b5c-8d6e-7f8091a2b3c4",
+   "n": 5,
+   "agent": "cfo",
+   "phase": "context_built",
+   "state": "finished",
+   "started_at": "2026-10-24T09:00:01.600Z",
+   "duration_s": 0.1,
+   "summary": "The CFO built a 18000-character prompt (about 4500 tokens of 8000).",
+   "details": {
+    "chars": 18000,
+    "tokens_est": 4500,
+    "budget_tokens": 8000,
+    "commitments_total": 9,
+    "commitments_included": 6,
+    "section.charter_chars": 2400,
+    "section.memory_chars": 9100
+   },
+   "audience": "operator",
+   "source": "agent"
+  },
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "0b7c9d1e-2f3a-4b5c-8d6e-7f8091a2b3c4",
+   "n": 6,
+   "agent": "cfo",
+   "phase": "model_call",
+   "state": "started",
+   "started_at": "2026-10-24T09:00:01.700Z",
+   "duration_s": null,
+   "summary": "The CFO sent model request 1 of this turn.",
+   "details": {
+    "request": 1,
+    "rate_limited_so_far": 0,
+    "budget_s": 60,
+    "elapsed_s": 0.0
+   },
+   "audience": "operator",
+   "source": "bridge"
+  },
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "0b7c9d1e-2f3a-4b5c-8d6e-7f8091a2b3c4",
+   "n": 7,
+   "agent": "cfo",
+   "phase": "model_call",
+   "state": "finished",
+   "started_at": "2026-10-24T09:00:05.700Z",
+   "duration_s": 4.0,
+   "summary": "The CFO got its reply in 4 s.",
+   "details": {
+    "request": 1,
+    "tokens_in": 4400,
+    "tokens_out": 310
+   },
+   "audience": "operator",
+   "source": "bridge"
+  },
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "0b7c9d1e-2f3a-4b5c-8d6e-7f8091a2b3c4",
+   "n": 8,
+   "agent": "cfo",
+   "phase": "write_back",
+   "state": "finished",
+   "started_at": "2026-10-24T09:00:05.800Z",
+   "duration_s": 0.2,
+   "summary": "The CFO wrote 1 position.",
+   "details": {
+    "kinds": [
+     "position"
+    ],
+    "written": 1,
+    "failed_writes": 0
+   },
+   "audience": "operator",
+   "source": "agent"
+  },
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "0b7c9d1e-2f3a-4b5c-8d6e-7f8091a2b3c4",
+   "n": 9,
+   "agent": "cfo",
+   "phase": "outcome",
+   "state": "finished",
+   "started_at": "2026-10-24T09:00:05.900Z",
+   "duration_s": 4.8,
+   "summary": "The CFO spoke.",
+   "details": {
+    "outcome": "spoke",
+    "model_requests": 1,
+    "rate_limited": 0,
+    "wait_s": 0
+   },
+   "audience": "owner",
+   "source": "board"
+  },
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "0b7c9d1e-2f3a-4b5c-8d6e-7f8091a2b3c4",
+   "n": 10,
+   "agent": "founder",
+   "phase": "routing",
+   "state": "started",
+   "started_at": "2026-10-24T09:00:06.000Z",
+   "duration_s": null,
+   "summary": "The founder is choosing who speaks next.",
+   "details": {},
+   "audience": "owner",
+   "source": "board"
+  },
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "0b7c9d1e-2f3a-4b5c-8d6e-7f8091a2b3c4",
+   "n": 11,
+   "agent": "founder",
+   "phase": "routing",
+   "state": "finished",
+   "started_at": "2026-10-24T09:00:06.900Z",
+   "duration_s": 0.9,
+   "summary": "The founder chose the CMO to speak next: Demand next",
+   "details": {
+    "by": "founder",
+    "next_speaker": "cmo",
+    "reason": "Demand next",
+    "round_index": 2,
+    "terminate": false
+   },
+   "audience": "owner",
+   "source": "board"
+  },
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "0b7c9d1e-2f3a-4b5c-8d6e-7f8091a2b3c4",
+   "n": 12,
+   "agent": "cmo",
+   "phase": "memory_read",
+   "state": "skipped",
+   "started_at": "2026-10-24T09:00:07.000Z",
+   "duration_s": null,
+   "summary": "Not reported: the CMO's memory read (the agent does not report this phase yet).",
+   "details": {
+    "not_reported": true
+   },
+   "audience": "operator",
+   "source": "board"
+  },
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "0b7c9d1e-2f3a-4b5c-8d6e-7f8091a2b3c4",
+   "n": 13,
+   "agent": "cmo",
+   "phase": "model_call",
+   "state": "started",
+   "started_at": "2026-10-24T09:00:07.000Z",
+   "duration_s": null,
+   "summary": "The CMO sent model request 1 of this turn.",
+   "details": {
+    "request": 1,
+    "rate_limited_so_far": 0,
+    "budget_s": 60,
+    "elapsed_s": 0.0
+   },
+   "audience": "operator",
+   "source": "bridge"
+  },
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "0b7c9d1e-2f3a-4b5c-8d6e-7f8091a2b3c4",
+   "n": 14,
+   "agent": "cmo",
+   "phase": "model_call",
+   "state": "finished",
+   "started_at": "2026-10-24T09:00:10.000Z",
+   "duration_s": 3.0,
+   "summary": "The CMO got its reply in 3 s.",
+   "details": {
+    "request": 1
+   },
+   "audience": "operator",
+   "source": "bridge"
+  },
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "0b7c9d1e-2f3a-4b5c-8d6e-7f8091a2b3c4",
+   "n": 15,
+   "agent": "cmo",
+   "phase": "outcome",
+   "state": "finished",
+   "started_at": "2026-10-24T09:00:10.100Z",
+   "duration_s": 3.1,
+   "summary": "The CMO spoke.",
+   "details": {
+    "outcome": "spoke",
+    "model_requests": 1,
+    "rate_limited": 0,
+    "wait_s": 0
+   },
+   "audience": "owner",
+   "source": "board"
+  },
+  {
+   "schema": "boardroom.trace.v1",
+   "turn_id": "0b7c9d1e-2f3a-4b5c-8d6e-7f8091a2b3c4",
+   "n": 16,
+   "agent": "board",
+   "phase": "turn_closed",
+   "state": "finished",
+   "started_at": "2026-10-24T09:00:10.200Z",
+   "duration_s": 10.2,
+   "summary": "The turn closed: no more speakers. 10 s, 2 speaker(s) spoke, 3 model request(s), no waiting.",
+   "details": {
+    "reason": "no_more_speakers",
+    "speakers": 2,
+    "spoke": [
+     "cfo",
+     "cmo"
+    ],
+    "model_requests": 3,
+    "rate_limited": 0,
+    "wait_s": 0,
+    "entries": 16,
+    "dropped": 0
+   },
+   "audience": "owner",
+   "source": "board",
+   "next": "none"
+  }
+ ],
+ "idle_entry": {
+  "schema": "boardroom.trace.v1",
+  "turn_id": "5a6b7c8d-9e0f-4a1b-8c2d-3e4f5a6b7c8d",
+  "n": 1,
+  "agent": "board",
+  "phase": "idle",
+  "state": "finished",
+  "started_at": "2026-10-24T09:30:00.000Z",
+  "duration_s": null,
+  "summary": "No round is running: the agenda is empty.",
+  "details": {
+   "reason": "the agenda is empty",
+   "next_scheduled": "2026-10-24T10:00:00.000Z"
+  },
+  "audience": "owner",
+  "source": "board"
+ }
+}

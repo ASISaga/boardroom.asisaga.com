@@ -78,12 +78,19 @@ export class AuthGate {
         return false;
     }
 
-    /** Show admin-only controls (`[data-boardroom-admin]`) only to administrators. */
+    /**
+     * Show admin-only controls (`[data-boardroom-admin]`) only to
+     * administrators. `operate` (an ASI Saga operator, proposed to the
+     * Function App, step 3) only offers the trace's operator view: whether
+     * operator entries arrive at all is the server's decision.
+     */
     applyCapabilities(capabilities) {
         this.app.capabilities = {
             participate: capabilities?.participate === true,
             administer: capabilities?.administer === true,
+            operate: capabilities?.operate === true,
         };
+        this.app.traceView?.setOperator(this.app.capabilities.operate);
         this.app.toggleAttribute('data-can-administer', this.app.capabilities.administer);
         this.app.querySelectorAll('[data-boardroom-admin]').forEach((el) => {
             el.hidden = !this.app.capabilities.administer;
