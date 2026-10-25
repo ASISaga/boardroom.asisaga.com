@@ -201,7 +201,7 @@ describe('CopilotKitClient against the Boardroom /ag-ui contract', () => {
     ]);
   });
 
-  describe('speaker relay (Mind context / prompt / inference, boardroom#79)', () => {
+  describe('speaker relay (model-call identifiers, never prompt text)', () => {
     test('each relay is matched to its speaker\'s message, whether it comes before or after it', async () => {
       http = installFetch(() => ({ events: STREAMS.turn_complete_with_relay }));
       const { client, calls } = recordingClient();
@@ -209,11 +209,17 @@ describe('CopilotKitClient against the Boardroom /ag-ui contract', () => {
       const { runId } = http.requests[0].body;
       const cfo = {
         actor: 'cfo',
-        mind_context: 'cfo slice: <b>runway</b> 4 months',
-        prompt: 'You are the CFO. <script>alert(1)</script>',
+        turn_id: 't5',
+        attempt: 1,
+        prompt_chars: 18000,
+        prompt_sha: '0123456789ab',
+        otel_trace_id: '4bf92f3577b34da6a3ce929d0e0e4736',
         inference: 'Runway is four months.',
       };
-      const founder = { actor: 'founder', mind_context: null, prompt: 'You are the founder.', inference: null };
+      const founder = {
+        actor: 'founder', turn_id: 't5', attempt: 2, prompt_chars: 900, prompt_sha: 'fedcba987654',
+        otel_trace_id: null, inference: null,
+      };
       assert.deepEqual(calls.relay, [
         { relay: cfo, messageId: 't5:cfo', runId },
         { relay: founder, messageId: 't5:founder', runId },
@@ -231,12 +237,16 @@ describe('CopilotKitClient against the Boardroom /ag-ui contract', () => {
 
     test('a missing or unknown relay is nothing to show, not an error', () => {
       for (const value of [undefined, null, 'text', 42, [], {}, { actor: 'cfo' },
-        { actor: 'cfo', mind_context: null, prompt: '', inference: undefined }]) {
+        { actor: 'cfo', prompt: 'text', mind_context: 'ctx', inference: undefined }]) {
         assert.equal(CopilotKitClient.speakerRelay(value), null, JSON.stringify(value));
       }
-      assert.deepEqual(CopilotKitClient.speakerRelay({ prompt: 'p', mind_context: { goals: ['grow'] } }), {
-        actor: null, mind_context: '{\n  "goals": [\n    "grow"\n  ]\n}', prompt: 'p', inference: null,
+      const relay = CopilotKitClient.speakerRelay({
+        actor: 'cfo', attempt: 1, prompt: 'secret prompt', mind_context: 'secret', prompt_ref: { chars: 5, sha256: 'abc' },
       });
+      assert.deepEqual(relay, {
+        actor: 'cfo', turn_id: null, attempt: 1, prompt_chars: 5, prompt_sha: 'abc', otel_trace_id: null, inference: null,
+      });
+      assert.ok(!JSON.stringify(relay).includes('secret'));
     });
 
     test('streams without a relay report none', async () => {

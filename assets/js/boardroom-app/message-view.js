@@ -6,6 +6,9 @@
  */
 
 import {
+    FOUNDRY_TRACE_LINK_TEXT,
+    FOUNDRY_TRACE_URL,
+    RELAY_IDENTIFIER_LABELS,
     RELAY_PANEL_SUMMARY,
     RELAY_SECTIONS,
 } from './constants.js';
@@ -133,7 +136,8 @@ export class MessageView {
         const bubble = this.app.querySelector(this.bubbleSelector('copilotkit-msg', messageId));
         if (!bubble || !relay || typeof relay !== 'object') return;
         const sections = RELAY_SECTIONS.filter(([key]) => typeof relay[key] === 'string' && relay[key]);
-        if (!sections.length) return;
+        const ids = RELAY_IDENTIFIER_LABELS.filter(([key]) => relay[key] != null && relay[key] !== '');
+        if (!sections.length && !ids.length) return;
 
         let panel = bubble.querySelector('.boardroom-relay');
         if (!panel) {
@@ -146,7 +150,28 @@ export class MessageView {
         const summary = document.createElement('summary');
         summary.className = 'boardroom-relay__summary';
         summary.textContent = RELAY_PANEL_SUMMARY;
-        panel.replaceChildren(summary, ...sections.map(([key, label]) => {
+        const traceId = typeof relay.otel_trace_id === 'string' && /^[0-9a-f]{32}$/i.test(relay.otel_trace_id)
+            ? relay.otel_trace_id : null;
+        const idsEl = document.createElement('dl');
+        idsEl.className = 'boardroom-relay__ids';
+        for (const [key, label] of ids) {
+            const dt = document.createElement('dt');
+            dt.textContent = label;
+            const dd = document.createElement('dd');
+            dd.textContent = String(relay[key]);
+            idsEl.append(dt, dd);
+        }
+        const extras = [idsEl];
+        if (traceId) {
+            const link = document.createElement('a');
+            link.className = 'boardroom-relay__trace-link';
+            link.href = FOUNDRY_TRACE_URL + encodeURIComponent(traceId);
+            link.target = '_blank';
+            link.rel = 'noopener noreferrer';
+            link.textContent = FOUNDRY_TRACE_LINK_TEXT;
+            extras.push(link);
+        }
+        panel.replaceChildren(summary, ...extras, ...sections.map(([key, label]) => {
             const section = document.createElement('div');
             section.className = `boardroom-relay__section boardroom-relay__section--${key.replace(/_/g, '-')}`;
             const labelEl = document.createElement('div');

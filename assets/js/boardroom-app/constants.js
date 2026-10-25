@@ -91,8 +91,15 @@ export const PENDING_THREAD_ID = 'boardroom:pending';
  * section per relay field. The values hold user and company data, so they
  * are only ever set as textContent.
  */
-export const RELAY_PANEL_SUMMARY = 'Mind / Prompt / Inference';
-export const RELAY_SECTIONS = [['mind_context', 'Mind context'], ['prompt', 'Prompt'], ['inference', 'Inference']];
+export const RELAY_PANEL_SUMMARY = 'Model call / Inference';
+export const RELAY_SECTIONS = [['inference', 'Inference']];
+export const RELAY_IDENTIFIER_LABELS = [
+    ['turn_id', 'Turn'], ['actor', 'Speaker'], ['attempt', 'Attempt'],
+    ['prompt_chars', 'Prompt length (chars)'], ['prompt_sha', 'Prompt sha256 (12)'],
+    ['otel_trace_id', 'Trace id'],
+];
+export const FOUNDRY_TRACE_URL = 'https://ai.azure.com/tracing?traceId=';
+export const FOUNDRY_TRACE_LINK_TEXT = 'Open in Foundry Traces';
 
 // Legacy 403 detail for a tenant with no active registry entry:
 // "this organization is not registered for Boardroom (error_id <32-hex>)".
