@@ -71,6 +71,20 @@ export class BoardroomChrome {
         agendaBtn.appendChild(agendaImg);
         actionsEl.appendChild(agendaBtn);
 
+        const copyBtn = document.createElement('button');
+        copyBtn.type = 'button';
+        copyBtn.className = 'chatroom-header-btn boardroom-action-btn';
+        copyBtn.title = 'Copy chat';
+        copyBtn.setAttribute('aria-label', 'Copy chat to clipboard');
+        copyBtn.setAttribute('data-boardroom-copy-chat', '');
+        const copyImg = document.createElement('img');
+        copyImg.src = `${cdnBase}/clipboard.svg`;
+        copyImg.alt = 'Copy chat';
+        copyImg.width = 18;
+        copyImg.height = 18;
+        copyBtn.appendChild(copyImg);
+        actionsEl.appendChild(copyBtn);
+
         const moreBtn = document.createElement('button');
         moreBtn.className = 'chatroom-header-btn boardroom-action-btn';
         moreBtn.title = 'More Options';
@@ -176,9 +190,46 @@ export class BoardroomChrome {
             agendaBtn.addEventListener('click', () => this.app.agendaPanel.toggle());
         }
 
+        const copyBtn = this.app.querySelector('[data-boardroom-copy-chat]');
+        if (copyBtn && !copyBtn.dataset.bound) {
+            copyBtn.dataset.bound = 'true';
+            copyBtn.addEventListener('click', () => this.copyChat());
+        }
+
         const fileAttachBtn = this.app.querySelector('[title="Attach File"]');
         if (fileAttachBtn && this.app.boardroomConfig.enableFileAttach) {
             fileAttachBtn.addEventListener('click', () => this.attachFile());
+        }
+    }
+
+    /** Chat transcript only (speaker bubbles; no trace, notes or relay panels). */
+    chatText() {
+        const messagesEl = this.app.elements?.messagesContainer;
+        if (!messagesEl) return '';
+        const lines = [];
+        messagesEl.querySelectorAll('.chatroom__message').forEach((el) => {
+            if (el.classList.contains('boardroom-note') || el.classList.contains('chatroom__message--system')) return;
+            const text = el.querySelector('.chatroom__text')?.textContent.trim();
+            if (!text) return;
+            const author = el.querySelector('.chatroom__author')?.textContent.trim() || 'You';
+            const time = el.querySelector('.chatroom__time')?.textContent.trim();
+            lines.push(`${author}${time ? ` (${time})` : ''}: ${text}`);
+        });
+        return lines.join('\n\n');
+    }
+
+    async copyChat() {
+        const text = this.chatText();
+        if (!text) {
+            this.app.showToast('No chat to copy', 'info');
+            return;
+        }
+        try {
+            await navigator.clipboard.writeText(text);
+            this.app.showToast('Chat copied to clipboard', 'success');
+        } catch (error) {
+            console.error('Error copying chat:', error);
+            this.app.showToast('Failed to copy chat', 'error');
         }
     }
 
