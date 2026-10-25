@@ -32,8 +32,9 @@ export const GUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0
 
 // The backend (ASISaga/boardroom, POST /ag-ui) runs ONE perpetual boardroom
 // per company; the Founder and C-suite speak as AG-UI steps
-// (STEP_STARTED.stepName). It exposes no roster REST endpoint, so the members
-// sidebar is seeded from the known board and driven by step events.
+// (STEP_STARTED.stepName). These are the known role ids, for display names and
+// for recognising a speaker step. They are NOT who is in the room: the members
+// sidebar lists only the room the hydrate's snapshot reports (room-model.js).
 export const BOARDROOM_ROSTER = [
     { agentId: 'founder', name: 'Founder', role: 'Founder' },
     { agentId: 'ceo', name: 'CEO', role: 'Chief Executive Officer' },

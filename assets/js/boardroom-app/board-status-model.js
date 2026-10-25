@@ -35,18 +35,25 @@ export function liveWait(heartbeat, now = Date.now()) {
     if (!waitingFor) return null;
     const label = WAITING_FOR_LABELS[waitingFor] || waitingFor;
     const waitS = typeof d.wait_s === 'number' && Number.isFinite(d.wait_s) ? d.wait_s : null;
-    let remainingS = null;
     let endsAt = null;
+    let estimated = false;
     if (typeof d.wait_remaining_s === 'number' && Number.isFinite(d.wait_remaining_s)) {
         endsAt = heartbeat.receivedAt + d.wait_remaining_s * 1000;
-        remainingS = Math.max(0, (endsAt - now) / 1000);
+    } else if (typeof d.wait_ends_at_ms === 'number' && Number.isFinite(d.wait_ends_at_ms)) {
+        endsAt = d.wait_ends_at_ms;
+    } else if (waitS != null) {
+        // Only the length is known: count from the first heartbeat that reported this wait.
+        endsAt = (heartbeat.waitStartedAt ?? heartbeat.receivedAt) + waitS * 1000;
+        estimated = true;
     }
+    const remainingS = endsAt != null ? Math.max(0, (endsAt - now) / 1000) : null;
     return {
         waitingFor,
         label,
         waitS,
         remainingS,
         endsAt,
+        estimated,
         over: remainingS != null && remainingS <= 0,
         speaker: typeof d.speaker === 'string' ? d.speaker : heartbeat.entry.agent,
     };
@@ -57,7 +64,7 @@ export function waitText(wait) {
     if (!wait) return '';
     if (wait.remainingS == null) return `Waiting for ${wait.label}.`;
     if (wait.over) return `The ${wait.waitingFor === 'rate_limit' ? 'rate-limit wait' : 'wait'} is over; the request goes again.`;
-    const left = `${Math.ceil(wait.remainingS)} s left`;
+    const left = `${wait.estimated ? 'about ' : ''}${Math.ceil(wait.remainingS)} s left`;
     const of = wait.waitS != null ? ` of a ${formatDuration(wait.waitS)} wait` : '';
     return `Waiting for ${wait.label}: ${left}${of}.`;
 }
@@ -69,14 +76,20 @@ export function waitText(wait) {
  * @param {import('./trace-model.js').TraceStore} input.store
  * @param {boolean} input.runInFlight  - a non-hydrate run is streaming
  * @param {string|null} [input.stepSpeaker] - STEP_STARTED speaker, when no trace says
- * @param {object|null} [input.boardState] - hydrate `board_status` {running, reason, next_scheduled}
+ * @param {object|null} [input.boardState] - hydrate `board_status` {running, reason, schedule}
+ * @param {import('./liveness-model.js').LivenessState|null} [input.liveness] - `boardroom_liveness` heard so far
+ * @param {number|null} [input.lastWordAt] - when the board last said anything (not a heartbeat), by this page's clock
  * @param {number} [input.now]
- * @returns {{state: 'running'|'idle', text: string, elapsedText: string, speaker: string|null, phase: string|null, elapsedS: number|null, wait: object|null, waitText: string}}
+ * @returns {{state: 'running'|'idle', text: string, elapsedText: string, speaker: string|null, phase: string|null, elapsedS: number|null, wait: object|null, waitText: string, lastWordText: string, heartbeats: number}}
  */
-export function boardStatus({ store, runInFlight = false, stepSpeaker = null, boardState = null, now = Date.now() }) {
+export function boardStatus({
+    store, runInFlight = false, stepSpeaker = null, boardState = null, liveness = null, lastWordAt = null, now = Date.now(),
+}) {
     const turn = store?.openTurn() || null;
-    if (turn || runInFlight) {
-        const hb = turn?.heartbeat || null;
+    if (turn || runInFlight || liveness?.running === true) {
+        const traceHb = turn?.heartbeat || null;
+        const liveHb = liveness?.last || null;
+        const hb = traceHb && liveHb ? (liveHb.receivedAt >= traceHb.receivedAt ? liveHb : traceHb) : (traceHb || liveHb);
         const entries = turn ? turn.sorted() : [];
         const last = entries[entries.length - 1] || null;
         const lastSpeaking = [...entries].reverse().find((e) => e.agent !== 'board' && e.phase !== 'routing') || null;
@@ -98,6 +111,16 @@ export function boardStatus({ store, runInFlight = false, stepSpeaker = null, bo
             elapsedS = (now - turn.firstReceivedAt) / 1000;
         }
         const wait = liveWait(hb, now);
+        const sinceHeard = hb?.entry?.details?.since_last_word_s;
+        let sinceWordS = null;
+        if (typeof sinceHeard === 'number' && Number.isFinite(sinceHeard)) sinceWordS = sinceHeard + (now - hb.receivedAt) / 1000;
+        else if (lastWordAt != null) sinceWordS = (now - lastWordAt) / 1000;
+        const heardAgent = hb?.entry?.agent && hb.entry.agent !== 'board' ? hb.entry.agent : speaker;
+        const heardPhase = hb?.entry?.phase || phase;
+        const heardBits = [heardAgent ? agentName(heardAgent) : null, heardPhase ? (PHASE_LABELS[heardPhase] || heardPhase).toLowerCase() : null].filter(Boolean);
+        const lastWordText = sinceWordS != null
+            ? `Last word from the board: ${formatDuration(Math.max(0, sinceWordS)) || '0 s'} ago${heardBits.length ? ` (${heardBits.join(', ')})` : ''}.`
+            : 'Last word from the board: not reported.';
         const parts = ['The board is in session.'];
         if (speaker) parts.push(`Speaking: ${agentName(speaker)}.`);
         if (phase === 'routing') parts.push('Phase: routing (choosing who speaks next).');
@@ -112,31 +135,62 @@ export function boardStatus({ store, runInFlight = false, stepSpeaker = null, bo
             elapsedS,
             wait,
             waitText: waitText(wait),
+            lastWordText,
+            heartbeats: liveness?.count ?? 0,
         };
     }
-    return { ...idleStatus({ store, boardState }), elapsedText: '', speaker: null, phase: null, elapsedS: null, wait: null, waitText: '' };
+    return {
+        ...idleStatus({ store, boardState }),
+        elapsedText: '',
+        speaker: null,
+        phase: null,
+        elapsedS: null,
+        wait: null,
+        waitText: '',
+        lastWordText: '',
+        heartbeats: liveness?.count ?? 0,
+    };
+}
+
+/**
+ * The schedule's three answers: a time, "none scheduled", or "unknown
+ * (reason)". Read from `schedule` {status: scheduled|none|unknown, next_at,
+ * cause} (hydrate `board_status.schedule`, or an idle entry's
+ * `details.schedule`); an older `next_scheduled` time is "scheduled". Anything
+ * else is "not reported": a missing or null `next_scheduled` is never read as
+ * "none", because the server may simply not have been able to read it.
+ * @returns {{status: 'scheduled'|'none'|'unknown'|'not_reported', nextMs: number|null, cause: string|null, text: string}}
+ */
+export function scheduleAnswer(source) {
+    const s = source && typeof source === 'object' ? source : {};
+    const sched = s.schedule && typeof s.schedule === 'object' ? s.schedule : null;
+    const cause = typeof (sched?.cause ?? sched?.reason) === 'string' ? (sched.cause ?? sched.reason) : null;
+    const at = typeof sched?.next_at === 'string' ? sched.next_at : (typeof s.next_scheduled === 'string' ? s.next_scheduled : null);
+    const atMs = at ? Date.parse(at) : NaN;
+    if (sched?.status === 'unknown') {
+        return { status: 'unknown', nextMs: null, cause, text: `Next round: unknown${cause ? ` (${cause})` : ' (the server gave no reason)'}.` };
+    }
+    if (sched?.status === 'none') {
+        return { status: 'none', nextMs: null, cause: null, text: 'No round is scheduled.' };
+    }
+    if (Number.isFinite(atMs)) {
+        return { status: 'scheduled', nextMs: atMs, cause: null, text: `Next round: ${formatClock(atMs)}.` };
+    }
+    return { status: 'not_reported', nextMs: null, cause: null, text: 'Next round: not reported.' };
 }
 
 /** "No round is running: <why>. Next round: <when>." from the trace or the hydrate. */
 export function idleStatus({ store = null, boardState = null } = {}) {
     const idle = store?.lastIdle?.entry || null;
-    let reason = null;
-    let next = null;
-    if (idle) {
-        reason = typeof idle.details?.reason === 'string' ? idle.details.reason : null;
-        next = typeof idle.details?.next_scheduled === 'string' ? idle.details.next_scheduled : null;
-    }
-    if (!idle && boardState && typeof boardState === 'object') {
-        reason = typeof boardState.reason === 'string' ? boardState.reason : null;
-        next = typeof boardState.next_scheduled === 'string' ? boardState.next_scheduled : null;
-    }
-    const known = !!idle || (boardState && typeof boardState === 'object');
-    const nextMs = next ? Date.parse(next) : NaN;
-    let text = `No round is running${reason ? `: ${reason}` : ''}.`;
-    if (Number.isFinite(nextMs)) text += ` Next round: ${formatClock(nextMs)}.`;
-    else if (known && next === null) text += ' No round is scheduled.';
-    else text += ' Next round: not reported.';
-    return { state: 'idle', text, reason, nextScheduled: Number.isFinite(nextMs) ? nextMs : null };
+    let source = null;
+    if (idle) source = idle.details || {};
+    else if (boardState && typeof boardState === 'object') source = boardState;
+    const reason = typeof source?.reason === 'string' ? source.reason : null;
+    const schedule = scheduleAnswer(source);
+    // The reason is not repeated when it is only the schedule's own cause.
+    const shownReason = reason && !(schedule.status === 'unknown' && reason === schedule.cause) ? reason : null;
+    const text = `No round is running${shownReason ? `: ${shownReason}` : ''}. ${schedule.text}`;
+    return { state: 'idle', text, reason, nextScheduled: schedule.nextMs, schedule };
 }
 
 /**
@@ -237,7 +291,15 @@ export class RunLogGate {
             if (line && run.source !== 'hydrate') run.pending.push(line);
             return { lines, idle: false };
         }
-        if (line) lines.push(line);
+        // A line that is not held must not jump ahead of lines that are: write
+        // the held ones first, so the log keeps the order the board produced.
+        if (line) {
+            if (!run.deliberated && run.pending.length) {
+                lines.push(...run.pending);
+                run.pending = [];
+            }
+            lines.push(line);
+        }
         return { lines, idle: false };
     }
 
