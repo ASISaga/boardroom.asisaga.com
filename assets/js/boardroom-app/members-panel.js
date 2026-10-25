@@ -7,12 +7,14 @@
 import {
     BOARDROOM_ROSTER,
 } from './constants.js';
+import { roomReport, roomCountText, ROOM_NOT_REPORTED, ROOM_NOT_REPORTED_DETAIL } from './room-model.js';
 
 export class MembersPanel {
     /** @param {HTMLElement} app - The BoardroomApp host element. */
     constructor(app) {
         this.app = app;
         this.activeSpeaker = null;
+        this.reported = false;
     }
 
     speakerInfo(name) {
@@ -35,15 +37,25 @@ export class MembersPanel {
         });
     }
 
+    /**
+     * The hydrate's room: only the members the server reports, online meaning
+     * in the current round. No room reported: no names and no count.
+     */
+    setRoom(state) {
+        const report = roomReport(state);
+        this.reported = !!report;
+        this.app.agents = (report?.members || []).map((m) => ({
+            ...m,
+            avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(m.name)}&background=random&size=64`,
+        }));
+        this.render();
+    }
+
     async load() {
         if (this.app.copilotKit) {
-            // The AG-UI backend has no roster endpoint; every member is
-            // 'online' as part of the perpetual boardroom.
-            this.app.agents = BOARDROOM_ROSTER.map((a) => ({
-                ...a,
-                online: true,
-                avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(a.name)}&background=random&size=64`,
-            }));
+            // The AG-UI backend has no roster endpoint: the room is what the
+            // hydrate's snapshot reports (setRoom). Until then, "not reported".
+            this.app.agents = [];
             this.render();
             return;
         }
@@ -76,6 +88,15 @@ export class MembersPanel {
         if (!this.app.boardroomElements.membersList) return;
 
         this.app.boardroomElements.membersList.replaceChildren();
+
+        if (this.app.copilotKit && !this.app.agents.length) {
+            const item = document.createElement('li');
+            item.className = 'chatroom-members-sidebar__item chatroom-members-sidebar__item--not-reported';
+            item.dataset.status = 'offline';
+            item.dataset.name = '';
+            item.textContent = this.reported ? 'Nobody is in the room.' : `${ROOM_NOT_REPORTED}: ${ROOM_NOT_REPORTED_DETAIL}`;
+            this.app.boardroomElements.membersList.appendChild(item);
+        }
 
         this.app.agents.forEach((agent) => {
             const item = document.createElement('li');
@@ -114,8 +135,10 @@ export class MembersPanel {
         });
 
         if (this.app.boardroomElements.membersCount) {
-            const onlineCount = this.app.agents.filter((a) => a.online).length;
-            this.app.boardroomElements.membersCount.textContent = `${onlineCount} online`;
+            // A count only of what the server reported: never of a list the page made up.
+            this.app.boardroomElements.membersCount.textContent = this.app.copilotKit
+                ? roomCountText(this.reported ? { members: this.app.agents } : null)
+                : `${this.app.agents.filter((a) => a.online).length} online`;
         }
     }
 

@@ -27,7 +27,8 @@ export const TRACE_EVENT = 'boardroom_trace';
 
 /**
  * Hydrate STATE_SNAPSHOT key carrying the stored traces of past turns
- * (proposed to step 3): `[{turn_id, entries: [...], trace_unavailable?}]`.
+ * (proposed to step 3): `[{turn_id, entries: [...], trace_unavailable?,
+ * trace?: {requested, arrived, withheld, lost}}]`.
  */
 export const TRACE_HISTORY_KEY = 'turn_traces';
 
@@ -232,6 +233,50 @@ export function roleOfMessage(messageId) {
     return cut > 0 ? id.slice(cut + 1).toLowerCase() : null;
 }
 
+/** What a heartbeat is waiting on, as a key: the same key means the same wait. */
+export function waitKey(entry) {
+    const d = entry?.details || {};
+    if (typeof d.waiting_for !== 'string') return null;
+    return `${d.waiting_for}|${d.speaker ?? entry.agent}|${d.wait_s ?? ''}`;
+}
+
+/**
+ * A heartbeat record `{entry, receivedAt, waitStartedAt}`. When only the
+ * length of a wait is sent (`wait_s`), its end is counted from the first
+ * heartbeat that reported that same wait.
+ */
+export function heartbeatRecord(entry, receivedAt, prev = null) {
+    const key = waitKey(entry);
+    const waitStartedAt = key && prev && waitKey(prev.entry) === key
+        ? (prev.waitStartedAt ?? prev.receivedAt)
+        : receivedAt;
+    return { entry, receivedAt, waitStartedAt };
+}
+
+/**
+ * Why a turn has no trace, from a report of `{requested, arrived, withheld,
+ * lost}` (the run result's `trace`, or a history item's `trace`): the board
+ * sent none, the server withheld it for the person's role, or the stored
+ * trace was lost. Null when the report cannot tell ("unavailable").
+ * @returns {{kind: 'withheld'|'lost'|'not_sent'|'not_requested', text: string}|null}
+ */
+export function traceAbsence(report) {
+    if (!isPlainObject(report)) return null;
+    if (report.withheld === true) {
+        return { kind: 'withheld', text: 'the server withheld this turn’s trace for your role' };
+    }
+    if (report.lost === true) {
+        return { kind: 'lost', text: 'the stored trace of this turn was lost' };
+    }
+    if (report.requested === false) {
+        return { kind: 'not_requested', text: 'this turn’s trace was not requested' };
+    }
+    if (report.arrived === false) {
+        return { kind: 'not_sent', text: 'the board sent no trace for this turn' };
+    }
+    return null;
+}
+
 /** One turn's trace: numbered entries, the latest heartbeat, and what is missing. */
 export class TurnTrace {
     constructor(turnId) {
@@ -240,6 +285,8 @@ export class TurnTrace {
         this.heartbeat = null;      // {entry, receivedAt}: the latest live entry
         this.invalid = 0;           // entries that could not be read
         this.unavailable = null;    // reason string when the trace is unavailable
+        this.absence = null;        // 'withheld' | 'lost' | 'not_sent' | 'not_requested' | null (cannot tell)
+        this.serverError = null;    // {code, message} of the run's RUN_ERROR, as sent
         this.live = false;          // received on a live stream (not history)
         this.firstReceivedAt = null;
         this.lastReceivedAt = null;
@@ -250,13 +297,14 @@ export class TurnTrace {
         if (this.firstReceivedAt == null) this.firstReceivedAt = receivedAt;
         this.lastReceivedAt = receivedAt;
         if (entry.live) {
-            this.heartbeat = { entry, receivedAt };
+            this.heartbeat = heartbeatRecord(entry, receivedAt, this.heartbeat);
             return;
         }
         if (this.entries.size >= MAX_ENTRIES_PER_TURN && !this.entries.has(entry.n)) return;
         this.entries.set(entry.n, entry);
         // A trace that did arrive is no longer "unavailable".
         this.unavailable = null;
+        this.absence = null;
         // A numbered entry after the heartbeat moves the state on.
         if (this.heartbeat && (this.heartbeat.entry.after ?? 0) < entry.n) this.heartbeat = null;
     }
@@ -382,8 +430,9 @@ export class TraceStore {
             }
             const turn = this.turn(item.turn_id);
             ids.push(item.turn_id);
+            const absence = traceAbsence(item.trace);
             if (item.trace_unavailable === true || !Array.isArray(item.entries)) {
-                turn.unavailable = 'the history read returned no trace for this turn';
+                if (!turn.entries.size) this.markUnavailable(item.turn_id, absence?.text || 'the history read returned no trace for this turn', absence?.kind || null);
                 continue;
             }
             for (const raw of item.entries) {
@@ -392,17 +441,21 @@ export class TraceStore {
                 this.receive(raw, { receivedAt, live: false });
             }
             if (!turn.entries.size && !turn.invalid) {
-                turn.unavailable = 'the history read returned an empty trace for this turn';
+                turn.unavailable = absence?.text || 'the history read returned an empty trace for this turn';
+                turn.absence = absence?.kind || null;
             }
         }
         return ids;
     }
 
     /** Mark a turn's trace unavailable (it never arrived, or could not be read). */
-    markUnavailable(turnId, reason) {
+    markUnavailable(turnId, reason, absence = null) {
         if (!turnId || !TURN_ID_PATTERN.test(turnId)) return null;
         const turn = this.turn(turnId);
-        if (!turn.entries.size && !turn.unavailable) turn.unavailable = reason;
+        if (!turn.entries.size && (!turn.unavailable || (absence && !turn.absence))) {
+            turn.unavailable = reason;
+            turn.absence = absence;
+        }
         return turn;
     }
 
@@ -666,6 +719,8 @@ export function buildTimeline(turn, { operator = false, operatorView = true } = 
         turnId: turn.turnId,
         status,
         unavailable: turn.unavailable,
+        absence: turn.absence,
+        serverError: turn.serverError,
         invalid: turn.invalid,
         opened: opened ? {
             summary: opened.summary,
@@ -803,4 +858,32 @@ export function traceText(turn, { operator = false, now = Date.now() } = {}) {
     if (missing.length) lines.push(`Missing entries: ${missing.map((n) => `#${n}`).join(', ')}`);
     if (turn.invalid) lines.push(`Unreadable entries: ${turn.invalid}`);
     return lines.join('\n');
+}
+
+/** The cause class a server sent, in words and as sent: `an internal error [internal]`. */
+export function serverClassText(code) {
+    if (typeof code !== 'string' || !code) return `${NOT_REPORTED.toLowerCase()}`;
+    return CAUSE_LABELS[code] ? `${CAUSE_LABELS[code]} [${code}]` : `[${code}]`;
+}
+
+/**
+ * A failure with no trace card (the stream carried no trace): the run's own
+ * RUN_ERROR becomes the one card. `bubbleText` is what the failing speaker
+ * said (the card's wording); the server's class and message are shown as
+ * sent, and never replaced by a guess.
+ * @param {{error: {code?: string, message?: string}, speaker?: string|null, bubbleText?: string}} input
+ */
+export function serverFailureCard({ error, speaker = null, bubbleText = '' }) {
+    const message = typeof error?.message === 'string' ? error.message.trim() : '';
+    const said = String(bubbleText || '').trim();
+    const code = typeof error?.code === 'string' && error.code ? error.code : null;
+    return {
+        agent: speaker,
+        title: speaker ? `${agentName(speaker)} could not answer` : 'The board’s turn failed',
+        text: said || message || 'The server sent no message with this failure.',
+        cause: code,
+        causeText: `Server’s cause class: ${serverClassText(code)}`,
+        // Both what the card says and what the server called it.
+        serverMessage: said && message && !repeatsFailure(said, { text: message }) ? message : null,
+    };
 }

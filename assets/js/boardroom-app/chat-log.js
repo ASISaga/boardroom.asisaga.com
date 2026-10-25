@@ -18,6 +18,7 @@ import {
     CLIENT_LOG_SHOW_LABEL,
 } from './constants.js';
 import { RunLogGate } from './board-status-model.js';
+import { LIVENESS_EVENT } from './liveness-model.js';
 import { ClientLogBuffer } from './client-log-model.js';
 
 function localStorageOrNull() {
@@ -213,7 +214,8 @@ export class ChatLog {
     showProtocolEvent(event, runId, source) {
         const type = String(event?.type || '');
         let c = this.classify(event);
-        if (!c && type === 'CUSTOM' && event.name !== CopilotKitClient.TRACE_EVENT) {
+        // Liveness feeds the status strip (TraceView.onLiveness); it is never a log line.
+        if (!c && type === 'CUSTOM' && event.name !== CopilotKitClient.TRACE_EVENT && event.name !== LIVENESS_EVENT) {
             const name = String(event.name || '');
             if (/(error|fail)/i.test(name)) c = { level: 'error', text: `${name}: ${typeof event.value === 'string' ? event.value : JSON.stringify(event.value ?? '')}` };
             else if (/(warn|conflict)/i.test(name)) c = { level: 'warning', text: `${name}: ${typeof event.value === 'string' ? event.value : JSON.stringify(event.value ?? '')}` };

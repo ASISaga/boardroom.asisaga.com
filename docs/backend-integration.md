@@ -548,6 +548,49 @@ Models (DOM-free, tested in `tests/agui/trace.contract.test.js`):
 `client-log-model.js`. Views: `trace-view.js` (strip and timelines),
 `run-status.js` (banner), `chat-log.js` (log panel).
 
+### Liveness as status, and only what is known (follow-up 3; issue #78)
+
+**Liveness.** `CUSTOM` `boardroom_liveness` (about every 5 s while a run is
+open) feeds the status strip and is never a log line (`liveness-model.js`).
+The value is read tolerantly; a field that is not sent is "not reported":
+`running`, `phase`, `agent`, `elapsed_s`, `since_last_word_s`, `waiting_for`,
+`wait_s`, `wait_remaining_s`, `wait_ends_at` (+ `server_now`), `turn_id`.
+The strip shows running or idle, speaker and phase, run time, time since the
+board's last word, and the rate-limit wait with a countdown. The end of a
+wait is `wait_remaining_s` from arrival; else `wait_ends_at` (shifted by
+`server_now`); else, when only `wait_s` is sent, the first heartbeat that
+reported that wait plus its length ("about N s left"). A heartbeat resets the
+quiet clock (5 s / 15 s thresholds unchanged). The count of heartbeats is in
+the operator detail.
+
+**Log order.** Heartbeat lines used to appear above "Run started" because the
+log holds a run's lifecycle lines until the run holds deliberation, while
+other CUSTOM lines were written at once. Liveness no longer writes lines, and
+any line that is not held first releases the lines that are, so the log keeps
+arrival order.
+
+**More hydrate `STATE_SNAPSHOT` keys (proposed, boardroom#84):**
+
+| Key | Shape | Used for |
+|---|---|---|
+| `board_status.schedule` | `{status: scheduled\|none\|unknown, next_at, cause}` | the three schedule answers; a missing one is "not reported" (a bare `next_scheduled: null` is never read as "none") |
+| `room` | `[{agent_id, name?, role?, online?}]` or `{members: [...]}` | the members panel and its count; none reported: "not reported", no names |
+| `access` | `{roles: [...], audience: owner\|operator, token: ok\|stale, detail?}` | the access line; an owner sees only the view; "Sign in again" on a stale token |
+| `memory.detail` | string | the failed history read's detail, in the operator detail only |
+| `turn_traces[].trace` | `{requested, arrived, withheld, lost}` | why a past turn has no trace |
+
+`RUN_FINISHED.result.trace` (`{requested, arrived, withheld}`) tells a live
+turn's "no trace" apart: the board sent none, withheld for the role, was not
+asked, or (history) the stored trace was lost; with no report the page keeps
+"Trace unavailable" and says the server did not say why. A trace stored after
+the run appears under its turn when history is next read.
+
+**Failures.** A failed run is one card. With a trace card, the server's class
+and words from the `RUN_ERROR` are added to it; with none, the failing
+speaker's words (or the server's) become the card, tagged "Server's cause
+class: <words> [class]" as sent (`internal` stays `internal`). No separate
+`[ERROR]` line is written for it.
+
 ## Client module layout
 
 The two entry points keep their paths and public APIs; their logic lives in

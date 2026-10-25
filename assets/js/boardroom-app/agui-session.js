@@ -13,6 +13,7 @@ import {
     PENDING_THREAD_ID,
     HISTORY_RETRY_PROP,
 } from './constants.js';
+import { LIVENESS_EVENT } from './liveness-model.js';
 
 export class AguiSession {
     /** @param {HTMLElement} app - The BoardroomApp host element. */
@@ -84,8 +85,9 @@ export class AguiSession {
         this.app.copilotKit.onError = (error, runId) => {
             this.app.runStatus.clearInterjectionFor(runId);
             this.app.runStatus.clearDeliberating(runId);
-            // The trace's failure card already says it: show the failure once.
-            this.handleRunError(error, { shownInTrace: this.app.traceView.failureShownFor(runId) });
+            // A run's failure is shown once, as a card (the trace's, or one built
+            // from the RUN_ERROR); the speaker is read before the run ends.
+            this.handleRunError(error, { runId });
             this.app.traceView.onRunEnded(runId);
         };
         this.app.copilotKit.onRunStarted = (runId, threadId, source) => {
@@ -99,7 +101,8 @@ export class AguiSession {
             this.app.traceView.onRunEnded(runId, this.runSource(runId));
             this.app.runStatus.sync();
         };
-        this.app.copilotKit.onRunResult = (result) => {
+        this.app.copilotKit.onRunResult = (result, runId) => {
+            this.app.traceView.onRunResult(result, runId);
             if (result && result.cancelled === true) {
                 this.app.showToast('The boardroom turn was cancelled', 'info');
             }
@@ -121,6 +124,7 @@ export class AguiSession {
             this.app.runStatus.clearInterjectionFor(runId);
             this.app.runStatus.clearDeliberating(runId);
             this.app.membersPanel.setActiveSpeaker(speaker);
+            this.app.traceView.noteSpeaker(speaker);
         };
         this.app.copilotKit.onStepFinished = (speaker) => {
             if (this.app.membersPanel.activeSpeaker && this.app.membersPanel.activeSpeaker === String(speaker || '').toLowerCase()) {
@@ -146,12 +150,13 @@ export class AguiSession {
             this.app.traceView.onRunEnded(runId, source);
             this.app.chatLog.gate.forget(runId);
         };
-        this.app.copilotKit.onCustomEvent = (name, value) => this.handleBoardroomEvent(name, value);
+        this.app.copilotKit.onCustomEvent = (name, value, runId) => this.handleBoardroomEvent(name, value, runId);
         this.app.copilotKit.onStateChange = (state) => {
             // A hydrate's snapshot always says whether mind answered; a turn's
             // state only changes the banner when it carries live_only itself.
             if (this.hydrating || (state && ('live_only' in state || 'memory' in state))) this.app.runStatus.setLiveOnly(state);
             if (this.hydrating) this.app.traceView.loadState(state);
+            if (this.hydrating || (state && 'room' in state)) this.app.membersPanel.setRoom(state);
             const away = Number(state?.since_you_were_away || 0);
             if (away > 0 && this.hydrating) {
                 this.app.showToast(`${away} boardroom decision${away === 1 ? '' : 's'} while you were away`, 'info');
@@ -192,7 +197,7 @@ export class AguiSession {
         return this.app.copilotKit?.runSource(runId);
     }
 
-    handleRunError(error, { shownInTrace = false } = {}) {
+    handleRunError(error, { runId = null } = {}) {
         console.error('[Boardroom] AG-UI error:', error);
         this.app.runStatus.sync();
         this.app.hideLoading();
@@ -201,8 +206,10 @@ export class AguiSession {
             this.app.authGate.onRejected(error);
             return;
         }
-        if (shownInTrace && error?.name === 'RunError') return;
-        this.app.chatLog.errorNote(error);
+        // A failed run is one card with the server's cause class as sent; no second error line.
+        const cardShown = error?.name === 'RunError' && error?.code !== 'SanitizationRejected'
+            && this.app.traceView.reportServerFailure(error, runId);
+        if (!cardShown) this.app.chatLog.errorNote(error);
         // RUN_ERROR codes from the backend (07 turn_failed / sanitization).
         if (error?.code === 'SanitizationRejected') {
             this.app.showToast('Your message could not be accepted – please rephrase it and retry', 'error');
@@ -227,8 +234,13 @@ export class AguiSession {
     }
 
     /** Boardroom-level CUSTOM events: position_stated, resolution, state_conflict. */
-    handleBoardroomEvent(name, value) {
+    handleBoardroomEvent(name, value, runId) {
         let text = null;
+        if (name === LIVENESS_EVENT) {
+            // Liveness feeds the status strip; it is never a log line or a page event.
+            this.app.traceView.onLiveness(value, runId);
+            return;
+        }
         if (name === 'position_stated') {
             const who = value?.actor || 'Board member';
             text = `${who} — ${value?.position ?? 'position'}${value?.summary ? `: ${value.summary}` : ''}`;

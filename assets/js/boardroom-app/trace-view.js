@@ -28,7 +28,13 @@ import {
     traceText,
     turnIdOfMessage,
     roleOfMessage,
+    serverClassText,
+    serverFailureCard,
+    traceAbsence,
+    traceEntryOf,
 } from './trace-model.js';
+import { LivenessState, LIVENESS_EVENT } from './liveness-model.js';
+import { accessReport, accessView, SIGN_IN_AGAIN_LABEL } from './access-model.js';
 import {
     boardStatus,
     idleStatus,
@@ -66,6 +72,12 @@ export class TraceView {
         this.lastEventAt = null;
         this.lastBytesAt = null;
         this.boardState = null;        // hydrate `board_status`
+        this.liveness = new LivenessState();
+        this.lastWordAt = null;        // the board's last word (not a heartbeat), this page's clock
+        this.access = null;            // hydrate `access`, normalised
+        this.memoryDetail = null;      // hydrate `memory.detail` (operators)
+        this.traceReports = new Map(); // runId -> why its stream carried no trace
+        this.lastSpeaker = null;
     }
 
     get operator() {
@@ -100,8 +112,20 @@ export class TraceView {
         elapsed.hidden = true;
         const wait = el('div', 'boardroom-status__wait');
         wait.hidden = true;
+        const lastWord = el('div', 'boardroom-status__lastword');
+        lastWord.hidden = true;
         const silence = el('div', 'boardroom-status__silence');
         silence.hidden = true;
+        const access = el('div', 'boardroom-status__access');
+        const accessText = el('span', 'boardroom-status__access-text');
+        const signIn = el('button', 'boardroom-status__sign-in', SIGN_IN_AGAIN_LABEL);
+        signIn.type = 'button';
+        signIn.hidden = true;
+        signIn.addEventListener('click', () => this.app.msalAuth?.redirectToLogin());
+        access.append(accessText, signIn);
+        const operatorDetail = el('details', 'boardroom-status__operator-detail');
+        operatorDetail.hidden = true;
+        operatorDetail.append(el('summary', null, 'Operator detail'), el('pre', 'boardroom-status__operator-text'));
         const opLabel = el('label', 'boardroom-status__operator');
         opLabel.hidden = true;
         const opInput = document.createElement('input');
@@ -110,11 +134,14 @@ export class TraceView {
         opInput.addEventListener('change', () => {
             this.operatorView = opInput.checked;
             this.renderAll();
+            this.renderStrip();
         });
         opLabel.append(opInput, document.createTextNode(` ${TRACE_OPERATOR_VIEW_LABEL}`));
-        strip.append(state, elapsed, wait, silence, opLabel);
+        strip.append(state, elapsed, lastWord, wait, silence, access, operatorDetail, opLabel);
         messagesEl.parentNode.insertBefore(strip, messagesEl);
-        this.strip = { root: strip, state, elapsed, wait, silence, opLabel, opInput };
+        this.strip = {
+            root: strip, state, elapsed, lastWord, wait, silence, opLabel, opInput, accessText, signIn, operatorDetail,
+        };
         this.renderStrip();
     }
 
@@ -127,6 +154,8 @@ export class TraceView {
             runInFlight,
             stepSpeaker: this.app.membersPanel?.activeSpeaker || null,
             boardState: this.boardState,
+            liveness: this.liveness,
+            lastWordAt: this.lastWordAt,
             now,
         });
         const s = this.strip;
@@ -134,6 +163,8 @@ export class TraceView {
         if (s.state.textContent !== status.text) s.state.textContent = status.text;
         s.elapsed.textContent = status.elapsedText;
         s.elapsed.hidden = !status.elapsedText;
+        s.lastWord.textContent = status.lastWordText;
+        s.lastWord.hidden = !status.lastWordText;
         s.wait.textContent = status.waitText;
         s.wait.hidden = !status.waitText;
         const silence = silenceStatus({
@@ -148,7 +179,46 @@ export class TraceView {
         s.silence.dataset.connection = silence?.connection || '';
         s.opLabel.hidden = !this.operator;
         s.opInput.checked = this.operatorView;
+        this.renderAccess(status);
         return status;
+    }
+
+    /** The access line, the sign-in-again prompt and the operator detail. */
+    renderAccess(status) {
+        const s = this.strip;
+        const view = accessView(this.access, { operator: this.operator });
+        const lines = [view.text];
+        if (view.operatorText && this.operator) lines.push(view.operatorText);
+        if (view.stale) lines.push(view.staleText);
+        const text = lines.join(' ');
+        if (s.accessText.textContent !== text) s.accessText.textContent = text;
+        s.signIn.hidden = !view.stale;
+        s.operatorDetail.hidden = !(this.operator && this.operatorView);
+        if (!s.operatorDetail.hidden) {
+            const detail = this.operatorDetailLines(status).join('\n');
+            const pre = s.operatorDetail.querySelector('pre');
+            if (pre.textContent !== detail) pre.textContent = detail;
+        }
+    }
+
+    /** What the operator detail holds: server-side facts a person needs to debug a turn. */
+    operatorDetailLines(status) {
+        const lines = [`Heartbeats received: ${this.liveness.count}`];
+        const hb = this.liveness.last;
+        lines.push(hb
+            ? `Last heartbeat: ${formatClock(hb.receivedAt)}${hb.entry.phase ? `, phase ${hb.entry.phase}` : ''}${hb.entry.agent && hb.entry.agent !== 'board' ? `, ${hb.entry.agent}` : ''}`
+            : 'Last heartbeat: none while no run is open');
+        lines.push(`Trace audience: ${this.operator ? 'operator' : 'owner'}`);
+        if (this.access) {
+            lines.push(`Roles read from the token: ${this.access.roles ? (this.access.roles.join(', ') || 'none') : 'not reported'}`);
+            lines.push(`Audience served: ${this.access.audience || 'not reported'}`);
+            if (this.access.detail) lines.push(`Access detail: ${this.access.detail}`);
+        } else {
+            lines.push('Access report: not reported');
+        }
+        lines.push(this.memoryDetail ? `History read failed, server detail: ${this.memoryDetail}` : 'History read detail: none reported');
+        if (status?.schedule) lines.push(`Schedule: ${status.schedule.status}${status.schedule.cause ? ` (${status.schedule.cause})` : ''}`);
+        return lines;
     }
 
     ensureTicker() {
@@ -178,9 +248,14 @@ export class TraceView {
 
     /** Any AG-UI event of a run. */
     onEvent(event, runId, source) {
-        this.lastEventAt = Date.now();
+        const at = Date.now();
+        this.lastEventAt = at;
         if (source !== 'hydrate') this.ensureTicker();
         const type = String(event?.type || '');
+        // A heartbeat resets the quiet clock but is not the board saying anything.
+        const entry = traceEntryOf(event);
+        const heartbeat = (type === 'CUSTOM' && event.name === LIVENESS_EVENT) || entry?.live === true;
+        if (!heartbeat) this.lastWordAt = at;
         if (type === 'TEXT_MESSAGE_START' || type === 'TEXT_MESSAGE_CONTENT') {
             this.runSpoke.add(runId);
             const turnId = turnIdOfMessage(event.messageId);
@@ -189,6 +264,29 @@ export class TraceView {
         if (type === 'RUN_FINISHED' && event.result && typeof event.result === 'object' && typeof event.result.turn_id === 'string') {
             if (!this.runTurns.has(runId)) this.runTurns.set(runId, event.result.turn_id);
         }
+    }
+
+    /** The speaker of the latest roster step, for a failure that has no trace card. */
+    noteSpeaker(speaker) {
+        this.lastSpeaker = typeof speaker === 'string' && speaker ? speaker.toLowerCase() : null;
+    }
+
+    /** One `boardroom_liveness` message: it feeds the strip and is never a log line. */
+    onLiveness(value, runId) {
+        const now = Date.now();
+        const liveness = this.liveness.receive(value, now);
+        if (!liveness) return;
+        this.lastEventAt = now;
+        if (runId && liveness.turnId && !this.runTurns.has(runId)) this.runTurns.set(runId, liveness.turnId);
+        this.ensureTicker();
+        this.renderStrip();
+    }
+
+    /** A run's result: whether its trace was requested, arrived or was withheld. */
+    onRunResult(result, runId) {
+        const report = result && typeof result === 'object' ? result.trace : null;
+        const absence = traceAbsence(report);
+        if (runId && absence) this.traceReports.set(runId, absence);
     }
 
     /** One raw trace entry from the stream. */
@@ -205,6 +303,7 @@ export class TraceView {
             return;
         }
         if (runId) this.runTurns.set(runId, entry.turnId);
+        if (entry.live) this.liveness.count += 1;
         if (!turn.idleOnly) this.renderTurn(entry.turnId);
         this.ensureTicker();
         this.renderStrip();
@@ -217,13 +316,22 @@ export class TraceView {
             return;
         }
         const turnId = this.runTurns.get(runId);
+        this.liveness.endRun();
         if (turnId && this.runSpoke.has(runId)) {
             const turn = this.store.turns.get(turnId);
             if (!turn || (!turn.entries.size && !turn.heartbeat)) {
-                this.store.markUnavailable(turnId, 'this turn’s stream carried no trace');
+                // Say which kind of "no": the run result's trace fields, when the server sent them.
+                const absence = this.traceReports.get(runId);
+                this.store.markUnavailable(
+                    turnId,
+                    absence?.text || 'this turn’s stream carried no trace, and the server did not say why',
+                    absence?.kind || null,
+                );
                 this.renderTurn(turnId);
             }
         }
+        this.traceReports.delete(runId);
+        this.lastSpeaker = null;
         // A live turn that never closed is no longer running once its run ended.
         const turn = turnId ? this.store.turns.get(turnId) : null;
         if (turn && turn.isOpen) {
@@ -233,6 +341,50 @@ export class TraceView {
         this.runSpoke.delete(runId);
         this.runTurns.delete(runId);
         this.renderStrip();
+    }
+
+    /**
+     * A run failed (RUN_ERROR): show it once, as a failure card. With a trace
+     * card for the turn, the server's class and words are added to it; with
+     * none, the failing speaker's words (or the server's) become the card.
+     * @returns {boolean} true when it was shown here.
+     */
+    reportServerFailure(error, runId) {
+        const turnId = this.runTurns.get(runId);
+        const turn = turnId ? this.store.turns.get(turnId) : null;
+        const serverError = { code: error?.code || null, message: typeof error?.message === 'string' ? error.message : '' };
+        if (turn && this.failureShownFor(runId)) {
+            turn.serverError = serverError;
+            this.renderTurn(turnId);
+            return true;
+        }
+        const speaker = this.lastSpeaker;
+        const bubble = turnId && speaker ? this.bubbleOf(turnId, speaker) : null;
+        const bubbleText = bubble?.querySelector('.chatroom__text')?.textContent || '';
+        const card = serverFailureCard({ error, speaker, bubbleText });
+        const box = el('div', 'boardroom-failure boardroom-failure--run');
+        box.dataset.cause = card.cause || '';
+        box.setAttribute('role', 'alert');
+        box.append(el('div', 'boardroom-failure__title', card.title), el('p', 'boardroom-failure__text', card.text));
+        const tags = el('div', 'boardroom-failure__tags');
+        tags.appendChild(el('span', 'boardroom-failure__cause', card.causeText));
+        box.appendChild(tags);
+        if (card.serverMessage) box.appendChild(el('p', 'boardroom-failure__server-message', `The server’s own words: ${card.serverMessage}`));
+        const messagesEl = this.app.elements?.messagesContainer;
+        if (!messagesEl) return false;
+        if (bubble && card.text === bubbleText.trim()) {
+            // The card carries the speaker's words: the bubble is not shown twice.
+            bubble.hidden = true;
+            bubble.dataset.boardroomRepeats = 'failure';
+            // An operator's Mind / Prompt / Inference panel stays with the failure.
+            const relay = bubble.querySelector('.boardroom-relay');
+            if (relay) box.appendChild(relay);
+            bubble.after(box);
+        } else {
+            messagesEl.appendChild(box);
+        }
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+        return true;
     }
 
     /** True when the run's failure is already on a failure card (shown once). */
@@ -251,6 +403,9 @@ export class TraceView {
         if (!state || typeof state !== 'object') return;
         if (state.trace_audience === 'operator') this.setOperator(true);
         if (state.board_status && typeof state.board_status === 'object') this.boardState = state.board_status;
+        this.access = accessReport(state);
+        const detail = state.memory && typeof state.memory === 'object' ? state.memory.detail : null;
+        this.memoryDetail = typeof detail === 'string' && detail ? detail.slice(0, 480) : null;
         if (Array.isArray(state[TRACE_HISTORY_KEY])) {
             this.historyIds = this.store.loadHistory(state[TRACE_HISTORY_KEY]);
         }
@@ -374,7 +529,12 @@ export class TraceView {
             running: 'running',
             closed: timeline.summary?.state === 'failed' ? 'ended with a failure' : 'finished',
             idle: 'idle',
-            unavailable: TRACE_UNAVAILABLE.toLowerCase(),
+            unavailable: ({
+                withheld: 'trace withheld for your role',
+                lost: 'trace lost',
+                not_sent: 'trace not sent by the board',
+                not_requested: 'trace not requested',
+            })[timeline.absence] || TRACE_UNAVAILABLE.toLowerCase(),
             incomplete: 'incomplete',
         }[timeline.status] || timeline.status;
         const opened = timeline.opened?.startedAt != null ? ` · opened ${formatClock(timeline.opened.startedAt)}` : '';
@@ -384,7 +544,15 @@ export class TraceView {
     bodyEls(turn, timeline, now) {
         const out = [];
         if (timeline.unavailable && !turn.entries.size) {
-            out.push(el('p', 'boardroom-turn__unavailable', `${TRACE_UNAVAILABLE}: ${timeline.unavailable}.`));
+            const absent = {
+                withheld: 'Trace withheld',
+                lost: 'Trace lost',
+                not_sent: 'Trace not sent',
+                not_requested: 'Trace not requested',
+            }[timeline.absence] || TRACE_UNAVAILABLE;
+            const p = el('p', 'boardroom-turn__unavailable', `${absent}: ${timeline.unavailable}.`);
+            p.dataset.absence = timeline.absence || 'unavailable';
+            out.push(p);
             return out;
         }
         if (timeline.opened) {
@@ -396,13 +564,14 @@ export class TraceView {
         }
         const list = el('ol', 'boardroom-turn__timeline');
         const wait = liveWait(timeline.heartbeat, now);
+        const lastFailing = [...timeline.items].reverse().find((i) => i.kind === 'speaker' && i.failure) || null;
         for (const item of timeline.items) {
             if (item.kind === 'routing') {
                 const li = el('li', 'boardroom-turn__routing', item.text);
                 li.dataset.state = item.row.running ? 'running' : item.row.state;
                 list.appendChild(li);
             } else if (item.kind === 'speaker') {
-                list.appendChild(this.speakerEl(item, wait, now));
+                list.appendChild(this.speakerEl(item, wait, now, item === lastFailing ? timeline.serverError : null));
             } else if (item.kind === 'board') {
                 list.appendChild(this.phaseEl(item.row, now, 'boardroom-turn__board'));
             } else if (item.kind === 'idle') {
@@ -432,7 +601,7 @@ export class TraceView {
         return out;
     }
 
-    speakerEl(group, wait, now) {
+    speakerEl(group, wait, now, serverError = null) {
         const li = el('li', 'boardroom-turn__speaker');
         li.dataset.agent = group.agent;
         if (group.state) li.dataset.state = group.state;
@@ -448,7 +617,7 @@ export class TraceView {
         if (wait && wait.speaker === group.agent) {
             li.appendChild(el('div', 'boardroom-turn__wait', waitText(wait)));
         }
-        if (group.failure) li.appendChild(this.failureEl(group.failure));
+        if (group.failure) li.appendChild(this.failureEl(group.failure, serverError));
         return li;
     }
 
@@ -487,7 +656,7 @@ export class TraceView {
         return li;
     }
 
-    failureEl(card) {
+    failureEl(card, serverError = null) {
         const box = el('div', 'boardroom-failure');
         box.dataset.cause = card.cause || '';
         box.append(
@@ -498,7 +667,14 @@ export class TraceView {
         tags.appendChild(el('span', 'boardroom-failure__cause',
             card.cause ? `Cause: ${card.causeLabel || card.cause} [${card.cause}]` : `Cause: ${NOT_REPORTED.toLowerCase()}`));
         if (card.next) tags.appendChild(el('span', 'boardroom-failure__next', `Next: ${card.nextLabel || card.next}`));
+        // What the server called the run's failure, as sent, beside what the card says.
+        if (serverError && serverError.code !== card.cause) {
+            tags.appendChild(el('span', 'boardroom-failure__server-class', `Server’s cause class: ${serverClassText(serverError.code)}`));
+        }
         box.appendChild(tags);
+        if (serverError?.message && !repeatsFailure(serverError.message, card)) {
+            box.appendChild(el('p', 'boardroom-failure__server-message', `The server’s own words: ${serverError.message}`));
+        }
         if (card.detail) {
             const d = card.detail;
             const lines = [];
