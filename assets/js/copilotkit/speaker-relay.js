@@ -1,7 +1,8 @@
 /**
  * Speaker relay (purpose-agent#37, boardroom#79): a CUSTOM `speaker_relay`
- * event carries a speaker's hydrated Mind context, exact LLM prompt and raw
- * inference ({actor, mind_context, prompt, inference}). It arrives before
+ * event carries a speaker's model-call identifiers and raw inference
+ * ({actor, turn_id, attempt, prompt_ref: {chars, sha256}, otel_trace_id,
+ * inference}); prompt text is never relayed. It arrives before
  * that speaker's text events, or on its own later. A missing or
  * unrecognised relay is nothing to show.
  */
@@ -10,30 +11,36 @@ export class SpeakerRelay {
   /** CUSTOM event name of the speaker relay. */
   static EVENT = 'speaker_relay';
 
-  /** Relay value keys, in display order. */
-  static FIELDS = ['mind_context', 'prompt', 'inference'];
+  /** Relay keys, in display order. Prompt text and Mind context are never relayed. */
+  static FIELDS = ['turn_id', 'attempt', 'prompt_chars', 'prompt_sha', 'otel_trace_id', 'inference'];
 
   /**
-   * Normalise a `speaker_relay` value to {actor, mind_context, prompt,
-   * inference}, each a string or null (a non-string value is shown as JSON).
-   * Returns null for anything with no relay text: nothing to show.
+   * Normalise a `speaker_relay` value to {actor, turn_id, attempt,
+   * prompt_chars, prompt_sha (12-char prefix), otel_trace_id, inference}.
+   * Missing values are null. Returns null when nothing is identifiable.
    */
   static normalize(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-    const relay = { actor: typeof value.actor === 'string' && value.actor ? value.actor : null };
-    let any = false;
-    for (const key of SpeakerRelay.FIELDS) {
-      const raw = value[key];
-      let text = null;
-      if (typeof raw === 'string') {
-        text = raw;
-      } else if (raw != null) {
-        try { text = JSON.stringify(raw, null, 2) ?? null; } catch (_) { text = null; }
-      }
-      relay[key] = text ? text : null;
-      if (relay[key]) any = true;
+    const str = (v) => (typeof v === 'string' && v ? v : null);
+    const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+    const ref = value.prompt_ref && typeof value.prompt_ref === 'object' ? value.prompt_ref : {};
+    const sha = str(ref.sha256);
+    let inference = null;
+    if (typeof value.inference === 'string') {
+      inference = value.inference || null;
+    } else if (value.inference != null) {
+      try { inference = JSON.stringify(value.inference, null, 2) ?? null; } catch (_) { inference = null; }
     }
-    return any ? relay : null;
+    const relay = {
+      actor: str(value.actor),
+      turn_id: str(value.turn_id),
+      attempt: num(value.attempt),
+      prompt_chars: num(ref.chars),
+      prompt_sha: sha ? sha.slice(0, 12) : null,
+      otel_trace_id: str(value.otel_trace_id),
+      inference,
+    };
+    return SpeakerRelay.FIELDS.some((k) => relay[k] != null) ? relay : null;
   }
 
   /** `next` over `prev`: a later relay fills in, never blanks, earlier fields. */

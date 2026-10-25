@@ -399,10 +399,10 @@ After MSAL sign-in, and before the hydrate, `boardroom-app-new.js` calls
 - `tenant_id` and `company_id` are only displayed. The page never sends them to
   the backend (INV-5).
 
-### Speaker relay (Mind context, prompt, inference)
+### Speaker relay (model-call identifiers, inference)
 
 For `company-admin` viewers the backend sends a `CUSTOM` event named
-`speaker_relay` with `{actor, mind_context, prompt, inference}`
+`speaker_relay` with `{actor, turn_id, attempt, prompt_ref: {chars, sha256}, otel_trace_id, inference}`
 ([ASISaga/boardroom#78](https://github.com/ASISaga/boardroom/issues/78)).
 It arrives before the speaker's text events, or later on its own.
 
@@ -410,10 +410,12 @@ It arrives before the speaker's text events, or later on its own.
   and reports it through `onSpeakerRelay(relay, messageId, runId)`, never
   `onCustomEvent`.
 - `MessageView` (`assets/js/boardroom-app/message-view.js`) adds a collapsed
-  "Mind / Prompt / Inference" panel (`.boardroom-relay`) under that speaker's
-  message.
-- The values are set as text only, never HTML, because prompts contain user
-  and company data.
+  "Model call / Inference" panel (`.boardroom-relay`) under that speaker's
+  message: turn id, speaker, attempt, prompt length, the first 12 characters
+  of `prompt_ref.sha256`, the trace id, and an "Open in Foundry Traces" link
+  built from `otel_trace_id`.
+- The page never shows prompt text or Mind context; any such keys are dropped.
+  Values are set as text only, never HTML.
 - A missing, empty or unrecognised relay shows nothing and is not an error.
 
 ### Owner's agenda: decisions, consent digest, veto
